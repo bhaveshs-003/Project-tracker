@@ -1,0 +1,15 @@
+{
+  "name": "functional-tool",
+  "version": "1.0.0",
+  "description": "Project tracking tool — static frontend plus a small auth backend",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "express": "^4.19.2",
+    "multer": "^2.3.0",
+    "nodemailer": "^9.1.1"
+  }
+}

@@ -1,0 +1,28 @@
+# Dependencies — restored with `npm install`
+node_modules/
+
+# Runtime data, not source.
+#
+# The database is created and seeded automatically on first run (see
+# server/db.js), so a fresh clone works without it. It is excluded because it
+# holds live session tokens, password hashes and real project content.
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Written by the log mail transport — one .eml per notification
+data/outbox/
+
+# Files attached to delay comments
+data/uploads/
+
+# Local environment overrides (SMTP_PASS and friends)
+.env
+.env.local
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

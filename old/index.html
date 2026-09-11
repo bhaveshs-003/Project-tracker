@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Functional Tool</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ============ Login ============ -->
+<div id="login-view" class="login-wrap hidden">
+  <form class="login-card" id="login-form">
+    <h1>Functional Tool</h1>
+    <p class="sub">Sign in to continue</p>
+
+    <label for="login-email">Email</label>
+    <input type="email" id="login-email" autocomplete="username" required />
+
+    <label for="login-password">Password</label>
+    <input type="password" id="login-password" autocomplete="current-password" required />
+
+    <p class="error hidden" id="login-error"></p>
+
+    <p class="warn-note hidden" id="file-warning">
+      This page was opened straight from the filesystem, so it cannot reach the
+      server no matter whether the server is running.
+      Open <a href="http://localhost:3000">http://localhost:3000</a> instead,
+      after starting it with <code>node server.js</code>.
+    </p>
+
+    <button type="submit" class="btn-primary btn-block" id="login-submit">Sign in</button>
+  </form>
+</div>
+
+<!-- ============ App ============ -->
+<div id="app-view" class="hidden">
+
+<header class="topbar">
+  <span class="logo">Functional Tool</span>
+  <div class="topbar-right">
+    <div class="identity">
+      <span class="identity-name" id="topbar-name"></span>
+      <span class="role-chip" id="role-chip"></span>
+    </div>
+    <div class="avatar sm" id="topbar-avatar">A</div>
+    <button type="button" class="btn-ghost btn-sm" id="logout">Log out</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="dashboard">Dashboard</button>
+  <button class="tab" data-tab="projects">Projects</button>
+  <button class="tab" data-tab="profile">Profile</button>
+  <button class="tab" data-tab="audit" id="audit-tab">Audit Trail</button>
+</nav>
+
+<main>
+  <!-- ============ Tab 1: Dashboard ============ -->
+  <section class="panel active" id="dashboard">
+    <h2>Dashboard</h2>
+    <div class="cards">
+      <div class="card"><span class="num" id="stat-total">0</span><span class="lbl">Total Projects</span></div>
+      <div class="card"><span class="num" id="stat-active">0</span><span class="lbl">In-Progress</span></div>
+      <div class="card"><span class="num" id="stat-review">0</span><span class="lbl">Not Started</span></div>
+      <div class="card"><span class="num" id="stat-done">0</span><span class="lbl">Completed</span></div>
+    </div>
+
+    <!-- Portfolio roll-up (company side only) -->
+    <div id="portfolio" class="hidden">
+      <div class="section-head">
+        <h3>Delivery Quality</h3>
+      </div>
+
+      <p class="empty hidden" id="pf-empty-quality">No items completed across your projects yet.</p>
+
+      <div id="pf-quality">
+        <div class="two-col">
+          <div class="box dash-box">
+            <h4>On-Time vs Delayed</h4>
+            <div id="pf-outcome"></div>
+          </div>
+          <div class="box dash-box">
+            <h4>Delays</h4>
+            <div id="pf-attribution"></div>
+          </div>
+        </div>
+
+        <div class="box dash-box hidden" id="pf-offenders-box">
+          <h4>Most Delays by Project</h4>
+          <div id="pf-offenders"></div>
+        </div>
+      </div>
+
+      <div class="box dash-box">
+        <h4>Quality by Project Type</h4>
+        <div id="pf-by-type"></div>
+      </div>
+
+      <div class="section-head">
+        <h3>Throughput &amp; Delay Trend</h3>
+      </div>
+      <div class="box dash-box">
+        <div id="pf-trend"></div>
+      </div>
+
+      <div class="section-head">
+        <h3>Delayed Projects</h3>
+      </div>
+      <div class="cards cards-single">
+        <div class="card"><span class="num" id="pf-delayed-count">0</span><span class="lbl">Projects With Delays</span></div>
+      </div>
+      <div class="box dash-box">
+        <div id="pf-delayed-list"></div>
+      </div>
+
+      <div class="section-head">
+        <h3>Project Progress</h3>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Items</th>
+            </tr>
+          </thead>
+          <tbody id="pf-rows"></tbody>
+        </table>
+      </div>
+      <p class="empty hidden" id="pf-empty">No projects yet.</p>
+    </div>
+
+    <h3>Recent Activity</h3>
+    <ul class="activity">
+      <li><b>Apollo</b> moved to <i>In Review</i> — 2h ago</li>
+      <li><b>Beacon</b> milestone completed — 5h ago</li>
+      <li><b>Cobalt</b> new task assigned to you — yesterday</li>
+      <li><b>Delta</b> deadline updated — 2 days ago</li>
+    </ul>
+  </section>
+
+  <!-- ============ Tab 2: Projects ============ -->
+  <section class="panel" id="projects">
+
+    <!-- ---- List view ---- -->
+    <div id="list-view">
+      <div class="panel-head">
+        <h2>Projects</h2>
+        <button class="btn-primary" id="new-project">+ New Project</button>
+      </div>
+
+      <input type="text" id="search" class="search" placeholder="Search by code or title…" />
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Title</th>
+              <th>Type</th>
+              <th>Partner Dates</th>
+              <th>Company Dates</th>
+              <th>Approved Date Range</th>
+              <th>Status</th>
+              <th class="right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="project-rows"></tbody>
+        </table>
+      </div>
+      <p class="empty hidden" id="empty-msg">No projects found.</p>
+    </div>
+
+    <!-- ---- Detail view ---- -->
+    <div id="detail-view" class="hidden">
+      <button class="btn-ghost back" id="back-to-list">← Back to Projects</button>
+
+      <div class="detail-head">
+        <div>
+          <span class="code-chip" id="d-code"></span>
+          <span class="type-chip" id="d-type"></span>
+          <h2 id="d-title"></h2>
+        </div>
+        <div class="detail-actions">
+          <div class="status-picker">
+            <label for="d-status-select">Status</label>
+            <select id="d-status-select">
+              <option>Not Started</option>
+              <option>In-Progress</option>
+              <option>Completed</option>
+            </select>
+          </div>
+          <button class="btn-ghost" id="d-edit">Edit Project</button>
+        </div>
+      </div>
+
+      <p class="view-only hidden" id="view-only-banner">
+        You are viewing this project as a Partner POC — milestones and sub-tasks are read-only.
+        Milestones submitted to you for approval can be approved here.
+      </p>
+
+      <p class="hint-bar hidden" id="status-hint"></p>
+
+      <p class="desc" id="d-desc"></p>
+
+      <!-- Project dashboard (company side only) -->
+      <section id="project-dashboard" class="hidden">
+        <div class="section-head">
+          <h3>Dashboard</h3>
+        </div>
+
+        <p class="empty hidden" id="dash-empty">Add milestones to see progress for this project.</p>
+
+        <div id="dash-body">
+          <div class="cards">
+            <div class="card"><span class="num" id="dash-percent">0%</span><span class="lbl">Overall Complete</span></div>
+            <div class="card"><span class="num" id="dash-milestones">0 / 0</span><span class="lbl">Milestones Completed</span></div>
+            <div class="card"><span class="num" id="dash-subtasks">0 / 0</span><span class="lbl">Sub-tasks Completed</span></div>
+            <div class="card"><span class="num" id="dash-delayed">0</span><span class="lbl">Delayed Items</span></div>
+            <div class="card">
+              <span class="num" id="dash-ontime">0 / 0</span>
+              <span class="lbl">Milestones On-Time</span>
+              <span class="card-sub" id="dash-ontime-sub"></span>
+            </div>
+          </div>
+
+          <div class="box dash-box">
+            <h4>Overall Progress</h4>
+            <div class="meter" id="dash-meter"></div>
+            <p class="meter-caption" id="dash-meter-caption"></p>
+          </div>
+
+          <div class="two-col">
+            <div class="box dash-box">
+              <h4>On-Time vs Delayed</h4>
+              <div id="dash-outcome"></div>
+            </div>
+            <div class="box dash-box">
+              <h4>Delays</h4>
+              <div id="dash-attribution"></div>
+            </div>
+          </div>
+
+          <div class="box dash-box">
+            <h4>Milestone Cycle Time</h4>
+            <div id="dash-cycle"></div>
+          </div>
+
+          <details class="box dash-box hidden" id="dash-reasons-box">
+            <summary id="dash-reasons-summary">Delay reasons</summary>
+            <ul class="reasons" id="dash-reasons"></ul>
+          </details>
+        </div>
+      </section>
+
+      <div class="two-col">
+        <div class="box">
+          <h4>Partner Provided Date</h4>
+          <p class="dates" id="d-partner"></p>
+        </div>
+        <div class="box">
+          <h4>Company Provided Date</h4>
+          <p class="dates" id="d-company"></p>
+        </div>
+        <div class="box approved">
+          <h4>Approved Date Range</h4>
+          <p class="dates" id="d-approved"></p>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="box">
+          <div class="box-head">
+            <h4>Organisation Resources</h4>
+            <button class="icon-btn" id="assign-resources">+ Assign</button>
+          </div>
+          <ul class="people" id="d-resources"></ul>
+        </div>
+        <div class="box">
+          <div class="box-head">
+            <h4>Partner Company POC</h4>
+            <button class="icon-btn" id="assign-pocs">+ Assign</button>
+          </div>
+          <ul class="people" id="d-pocs"></ul>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <h3>Milestones</h3>
+        <button class="btn-primary" id="add-milestone">+ Add Milestone</button>
+      </div>
+      <div id="d-milestones"></div>
+    </div>
+
+  </section>
+
+  <!-- ============ Tab 3: Profile ============ -->
+  <section class="panel" id="profile">
+    <h2>Profile</h2>
+    <div class="profile">
+      <div class="avatar" id="p-avatar">A</div>
+      <div>
+        <h3 id="p-name">Alex Morgan</h3>
+        <p class="muted" id="p-email">alex@example.com</p>
+      </div>
+      <span class="role-chip" id="p-role-chip"></span>
+    </div>
+
+    <form class="profile-form" onsubmit="event.preventDefault(); alert('Saved (demo only)');">
+      <label>Full name</label>
+      <input type="text" id="pf-name" />
+
+      <label>Role</label>
+      <input type="text" id="pf-role" />
+
+      <label>Access</label>
+      <input type="text" id="pf-access" readonly />
+
+      <label>About</label>
+      <textarea rows="3">Keeping projects on track, one tab at a time.</textarea>
+
+      <button type="submit" class="btn-primary">Save changes</button>
+    </form>
+
+    <!-- Admin only -->
+    <div id="user-management" class="hidden">
+      <div class="section-head">
+        <h3>User Management</h3>
+      </div>
+
+      <div class="box-head mgmt-head">
+        <h4>Company Resources</h4>
+        <button class="btn-primary" id="add-resource">+ Add Resource</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Job Title</th><th class="right">Actions</th></tr>
+          </thead>
+          <tbody id="resource-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="box-head mgmt-head">
+        <h4>Partner POCs</h4>
+        <button class="btn-primary" id="add-poc">+ Add Partner POC</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Job Title</th><th>Email</th><th>Credentials</th><th class="right">Actions</th></tr>
+          </thead>
+          <tbody id="poc-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Tab 4: Audit Trail ============ -->
+  <section class="panel" id="audit">
+    <div class="panel-head">
+      <h2>Audit Trail</h2>
+      <span class="muted-sm" id="audit-count"></span>
+    </div>
+
+    <div class="filter-row">
+      <input type="text" id="audit-search" class="search" placeholder="Search action, item, details or user…" />
+      <select id="audit-category">
+        <option value="">All categories</option>
+      </select>
+      <select id="audit-sort">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+        <option value="category">Category (A–Z)</option>
+        <option value="actor">User (A–Z)</option>
+      </select>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Category</th>
+            <th>Action</th>
+            <th>Item</th>
+            <th>Details</th>
+            <th>By</th>
+          </tr>
+        </thead>
+        <tbody id="audit-rows"></tbody>
+      </table>
+    </div>
+    <p class="empty hidden" id="audit-empty">No audit entries yet.</p>
+  </section>
+</main>
+</div><!-- /#app-view -->
+
+<!-- ============ Project add / edit modal ============ -->
+<div class="modal-overlay hidden" id="form-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="form-title">New Project</h3>
+      <button class="close" data-close>&times;</button>
+    </div>
+
+    <form id="project-form">
+      <input type="hidden" id="project-id" />
+
+      <div class="row">
+        <div>
+          <label for="f-code">Project Code *</label>
+          <input type="text" id="f-code" placeholder="PRJ-001" required />
+        </div>
+        <div>
+          <label for="f-type">Project Type *</label>
+          <select id="f-type" required>
+            <option value="">Select type…</option>
+            <option>Migration</option>
+            <option>Custom Application</option>
+            <option>Integration</option>
+          </select>
+        </div>
+      </div>
+
+      <label for="f-status">Project Status *</label>
+      <select id="f-status" required>
+        <option>Not Started</option>
+        <option>In-Progress</option>
+        <option>Completed</option>
+      </select>
+
+      <label for="f-title">Title *</label>
+      <input type="text" id="f-title" placeholder="Project title" required />
+
+      <label for="f-desc">Description</label>
+      <textarea id="f-desc" rows="3" placeholder="Short description of the project"></textarea>
+
+      <fieldset>
+        <legend>Partner Provided Date</legend>
+        <div class="row">
+          <div>
+            <label for="f-p-start">Start Date</label>
+            <input type="date" id="f-p-start" />
+          </div>
+          <div>
+            <label for="f-p-end">End Date</label>
+            <input type="date" id="f-p-end" />
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Company Provided Date</legend>
+        <div class="row">
+          <div>
+            <label for="f-c-start">Start Date</label>
+            <input type="date" id="f-c-start" />
+          </div>
+          <div>
+            <label for="f-c-end">End Date</label>
+            <input type="date" id="f-c-end" />
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Approved Date Range</legend>
+        <div class="row">
+          <div>
+            <label for="f-a-start">Start Date</label>
+            <input type="date" id="f-a-start" />
+          </div>
+          <div>
+            <label for="f-a-end">End Date</label>
+            <input type="date" id="f-a-end" />
+          </div>
+        </div>
+        <p class="day-hint" id="approved-days">No approved range set.</p>
+      </fieldset>
+
+      <p class="error hidden" id="form-error"></p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn-primary">Save Project</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ Milestone / Sub-task modal ============ -->
+<div class="modal-overlay hidden" id="item-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="item-title">Add Milestone</h3>
+      <button class="close" data-close>&times;</button>
+    </div>
+
+    <form id="item-form">
+      <label for="i-title">Title *</label>
+      <input type="text" id="i-title" placeholder="e.g. Discovery &amp; requirements" required />
+
+      <!-- Date ranges apply to milestones only, not sub-tasks -->
+      <div id="item-dates">
+        <div class="row">
+          <div>
+            <label for="i-start">Start Date</label>
+            <input type="date" id="i-start" />
+          </div>
+          <div>
+            <label for="i-end">End Date</label>
+            <input type="date" id="i-end" />
+          </div>
+        </div>
+        <p class="day-hint" id="item-days"></p>
+      </div>
+
+      <p class="error hidden" id="item-error"></p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ Delete project modal (reason required) ============ -->
+<div class="modal-overlay hidden" id="delete-modal">
+  <div class="modal narrow">
+    <div class="modal-head">
+      <h3>Delete Project</h3>
+      <button class="close" data-close>&times;</button>
+    </div>
+
+    <p class="confirm-message" id="delete-subject"></p>
+    <p class="warn-note">
+      This cannot be undone. The project, its milestones, sub-tasks and approvals will be
+      removed. The reason below is recorded in the audit trail.
+    </p>
+
+    <label for="delete-reason">Reason for deletion *</label>
+    <textarea id="delete-reason" rows="3" placeholder="Why is this project being deleted?"></textarea>
+
+    <p class="error hidden" id="delete-error"></p>
+
+    <div class="modal-actions">
+      <button type="button" class="btn-ghost" data-close>Cancel</button>
+      <button type="button" class="btn-danger" id="delete-confirm">Delete project</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Confirmation modal ============ -->
+<div class="modal-overlay hidden" id="confirm-modal">
+  <div class="modal narrow">
+    <div class="modal-head">
+      <h3 id="confirm-title">Please confirm</h3>
+      <button class="close" data-confirm-close>&times;</button>
+    </div>
+
+    <p class="confirm-message" id="confirm-message"></p>
+    <p class="warn-note" id="confirm-warning"></p>
+
+    <div id="confirm-typebox" class="hidden">
+      <label for="confirm-input" id="confirm-input-label"></label>
+      <input type="text" id="confirm-input" autocomplete="off" spellcheck="false" />
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn-ghost" data-confirm-close>Cancel</button>
+      <button type="button" class="btn-primary" id="confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Mark complete modal ============ -->
+<div class="modal-overlay hidden" id="complete-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="complete-title">Mark as Completed</h3>
+      <button class="close" data-close>&times;</button>
+    </div>
+
+    <form id="complete-form">
+      <p class="muted-sm" id="complete-subject"></p>
+
+      <label for="c-outcome">Completion *</label>
+      <select id="c-outcome" required>
+        <option value="">Select…</option>
+        <option>On-Time</option>
+        <option>Delayed</option>
+      </select>
+
+      <div id="delay-fields" class="hidden">
+        <label for="c-side">Delay Attributed To *</label>
+        <select id="c-side">
+          <option value="">Select…</option>
+          <option>Company Side</option>
+          <option>Partner Side</option>
+        </select>
+
+        <label for="c-notes">Delay Details</label>
+        <textarea id="c-notes" rows="3" placeholder="What caused the delay?"></textarea>
+      </div>
+
+      <label class="check-row hidden" id="cascade-row">
+        <input type="checkbox" id="c-cascade" checked />
+        <span id="cascade-label"></span>
+      </label>
+
+      <p class="error hidden" id="complete-error"></p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn-primary" id="complete-submit">Mark Completed</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ Add / edit person modal ============ -->
+<div class="modal-overlay hidden" id="person-modal">
+  <div class="modal narrow">
+    <div class="modal-head">
+      <h3 id="person-title">Add Resource</h3>
+      <button class="close" data-close>&times;</button>
+    </div>
+
+    <form id="person-form">
+      <input type="hidden" id="person-id" />
+
+      <label for="u-name">Name *</label>
+      <input type="text" id="u-name" placeholder="Full name" required />
+
+      <label for="u-role">Job Title *</label>
+      <input type="text" id="u-role" placeholder="e.g. Tech Lead" required />
+
+      <div id="credential-fields" class="hidden">
+        <label for="u-email">Email *</label>
+        <input type="email" id="u-email" placeholder="name@partner.example" />
+
+        <label for="u-password">Password *</label>
+        <input type="password" id="u-password" placeholder="At least 6 characters" />
+        <p class="day-hint" id="password-hint"></p>
+      </div>
+
+      <p class="error hidden" id="person-error"></p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ Milestone approval modal (Partner POC) ============ -->
+<div class="modal-overlay hidden" id="approval-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Approve Milestone</h3>
+      <button class="close" data-close>&times;</button>
+    </div>
+
+    <p class="muted-sm" id="approval-subject"></p>
+
+    <label for="a-rating">Feedback</label>
+    <div class="slider-row">
+      <input type="range" id="a-rating" min="1" max="5" step="1" value="4" />
+      <span class="rating-value" id="a-rating-label"></span>
+    </div>
+
+    <label for="a-comment">Comments *</label>
+    <div class="mention-wrap">
+      <textarea id="a-comment" rows="4"
+        placeholder="How did this milestone go? Type @ to tag someone on this project."></textarea>
+      <ul class="mention-list hidden" id="mention-list"></ul>
+    </div>
+    <p class="day-hint">Type <b>@</b> to tag a resource assigned to this project.</p>
+
+    <p class="error hidden" id="approval-error"></p>
+
+    <div class="modal-actions">
+      <button type="button" class="btn-ghost" data-close>Cancel</button>
+      <button type="button" class="btn-primary" id="approval-submit">Approve Milestone</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Assign people modal ============ -->
+<div class="modal-overlay hidden" id="assign-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="assign-title">Assign People</h3>
+      <button class="close" data-close>&times;</button>
+    </div>
+
+    <p class="muted-sm">Pick from the directory. Creating new users comes later.</p>
+    <div class="picker" id="assign-list"></div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn-ghost" data-close>Cancel</button>
+      <button type="button" class="btn-primary" id="assign-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
