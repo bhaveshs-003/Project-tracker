@@ -4,47 +4,59 @@
  * A partner asking for a project they are not POC on gets nothing back — the
  * row never enters the result set, so the route returns 404 rather than a
  * partially-redacted page. Admins see everything.
+ *
+ * Unchanged in meaning from the SQLite version; every function is now async
+ * because the database is across a network.
  */
 
-var db = require('./db').db;
+var sql = require('./sql');
 
 function isAdmin(user) {
   return user.role === 'admin';
 }
 
-// SQL fragment + params that restrict a query to what this user may see.
-// Used as: 'SELECT ... FROM projects p WHERE ' + clause
+function notFound(message) {
+  var err = new Error(message);
+  err.status = 404;
+  return err;
+}
+
+/**
+ * A SQL fragment plus its parameters, restricting a query to what this user may
+ * see. Placeholders start at $1, which is safe because this is always the whole
+ * WHERE clause — if that ever stops being true, take an offset argument rather
+ * than renumbering by hand at the call site.
+ */
 function projectClause(user, column) {
   var col = column || 'p.id';
-  if (isAdmin(user)) return { sql: '1 = 1', params: [] };
+  if (isAdmin(user)) return { sql: 'true', params: [] };
   return {
-    sql: col + ' IN (SELECT project_id FROM project_pocs WHERE person_id = ?)',
+    sql: col + ' IN (SELECT project_id FROM project_pocs WHERE person_id = $1)',
     params: [user.id]
   };
 }
 
-function visibleProjectIds(user) {
-  if (isAdmin(user)) {
-    return db.prepare('SELECT id FROM projects').all().map(function (r) { return r.id; });
-  }
-  return db.prepare('SELECT project_id AS id FROM project_pocs WHERE person_id = ?')
-    .all(user.id).map(function (r) { return r.id; });
+async function visibleProjectIds(user) {
+  var rows = isAdmin(user)
+    ? await sql.many('SELECT id FROM projects')
+    : await sql.many('SELECT project_id AS id FROM project_pocs WHERE person_id = $1', [user.id]);
+  return rows.map(function (r) { return r.id; });
 }
 
-function canSeeProject(user, projectId) {
+async function canSeeProject(user, projectId) {
   if (isAdmin(user)) {
-    return !!db.prepare('SELECT 1 FROM projects WHERE id = ?').get(projectId);
+    return sql.exists('SELECT 1 FROM projects WHERE id = $1', [projectId]);
   }
-  return !!db.prepare(
-    'SELECT 1 FROM project_pocs WHERE project_id = ? AND person_id = ?'
-  ).get(projectId, user.id);
+  return sql.exists(
+    'SELECT 1 FROM project_pocs WHERE project_id = $1 AND person_id = $2',
+    [projectId, user.id]);
 }
 
-// Is this user a POC on this project? The only people allowed to approve.
-function isProjectPoc(user, projectId) {
-  return !!db.prepare(
-    'SELECT 1 FROM project_pocs WHERE project_id = ? AND person_id = ?'
-  ).get(projectId, user.id);
+/** Is this user a POC on this project? The only people allowed to approve. */
+async function isProjectPoc(user, projectId) {
+  return sql.exists(
+    'SELECT 1 FROM project_pocs WHERE project_id = $1 AND person_id = $2',
+    [projectId, user.id]);
 }
 
 /**
@@ -52,36 +64,34 @@ function isProjectPoc(user, projectId) {
  * 404 and not 403: a partner should not be able to discover which project codes
  * exist by watching the status change.
  */
-function loadVisibleProject(user, projectId) {
-  var project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
-  if (!project || !canSeeProject(user, project.id)) {
-    var err = new Error('No such project');
-    err.status = 404;
-    throw err;
-  }
+async function loadVisibleProject(user, projectId) {
+  // A non-numeric id would make Postgres throw a type error rather than simply
+  // not matching, which would surface as a 500 instead of a 404.
+  var id = Number(projectId);
+  if (!Number.isInteger(id)) throw notFound('No such project');
+
+  var project = await sql.one('SELECT * FROM projects WHERE id = $1', [id]);
+  if (!project || !(await canSeeProject(user, project.id))) throw notFound('No such project');
   return project;
 }
 
-// Same, starting from a milestone id
-function loadVisibleMilestone(user, milestoneId) {
-  var milestone = db.prepare('SELECT * FROM milestones WHERE id = ?').get(milestoneId);
-  if (!milestone) {
-    var err = new Error('No such milestone');
-    err.status = 404;
-    throw err;
-  }
-  loadVisibleProject(user, milestone.project_id);   // throws 404 if out of scope
+async function loadVisibleMilestone(user, milestoneId) {
+  var id = Number(milestoneId);
+  if (!Number.isInteger(id)) throw notFound('No such milestone');
+
+  var milestone = await sql.one('SELECT * FROM milestones WHERE id = $1', [id]);
+  if (!milestone) throw notFound('No such milestone');
+  await loadVisibleProject(user, milestone.project_id);   // throws 404 if out of scope
   return milestone;
 }
 
-function loadVisibleSubtask(user, subtaskId) {
-  var subtask = db.prepare('SELECT * FROM subtasks WHERE id = ?').get(subtaskId);
-  if (!subtask) {
-    var err = new Error('No such sub-task');
-    err.status = 404;
-    throw err;
-  }
-  var milestone = loadVisibleMilestone(user, subtask.milestone_id);
+async function loadVisibleSubtask(user, subtaskId) {
+  var id = Number(subtaskId);
+  if (!Number.isInteger(id)) throw notFound('No such sub-task');
+
+  var subtask = await sql.one('SELECT * FROM subtasks WHERE id = $1', [id]);
+  if (!subtask) throw notFound('No such sub-task');
+  var milestone = await loadVisibleMilestone(user, subtask.milestone_id);
   return { subtask: subtask, milestone: milestone };
 }
 

@@ -37,35 +37,12 @@ async function request(method, url, body) {
   return data;
 }
 
-/**
- * Multipart, for a comment carrying a file. The Content-Type header is left
- * unset on purpose — the browser has to add it itself so the multipart boundary
- * matches the body it generated.
- */
-async function postForm(url, formData) {
-  let res;
-  try {
-    res = await fetch(url, { method: 'POST', credentials: 'same-origin', body: formData });
-  } catch {
-    throw new ApiError('Could not reach the server. Check it is running and try again.', 0);
-  }
-
-  let data = null;
-  try { data = await res.json(); } catch { /* empty or non-JSON body */ }
-
-  if (!res.ok) {
-    throw new ApiError((data && data.error) || `Request failed (${res.status})`, res.status);
-  }
-  return data;
-}
-
 export const api = {
   get: (url) => request('GET', url),
   post: (url, body) => request('POST', url, body ?? {}),
   patch: (url, body) => request('PATCH', url, body ?? {}),
   put: (url, body) => request('PUT', url, body ?? {}),
-  del: (url, body) => request('DELETE', url, body),
-  postForm
+  del: (url, body) => request('DELETE', url, body)
 };
 
 /** Opened off the filesystem, no server can ever be reached. */

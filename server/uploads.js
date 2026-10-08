@@ -1,28 +1,37 @@
 /**
- * File attachments for delay comments.
+ * File attachments, held in Supabase Storage.
  *
- * Three rules make this safe, and all three matter:
+ * The file never passes through this process. A serverless function caps the
+ * request body at 4.5MB, which a 10MB attachment cannot fit through, so the
+ * browser uploads straight to Storage:
  *
- *  1. The extension is the gate. If it is not on the allowlist the request is
- *     refused — the browser's declared MIME type is never trusted, it is
- *     *derived* from the extension, so the stored value cannot be forged.
- *  2. Nothing user-controlled reaches the filesystem. The original name is a
- *     database column that only ever gets echoed back as escaped text; on disk
- *     the file is a UUID, so "../../.." and friends have nowhere to go.
- *  3. Uploads live in data/, which is not served statically, and come back only
- *     through an authenticated route that forces a download.
+ *   1. POST .../upload-url   Express checks permission, issues a signed upload
+ *                            URL and records the intent in pending_uploads.
+ *   2. PUT  <signed url>     The browser sends the bytes to Supabase directly.
+ *   3. POST .../decision     The comment claims the object; Express verifies it
+ *                            exists, is the right size and type, and belongs to
+ *                            the person claiming it.
  *
- * Together those mean an uploaded file cannot be executed in this app's origin,
- * which is the failure mode that turns an attachment feature into stored XSS.
+ * The safety rules are unchanged from the disk version and still hold:
+ *
+ *  · The extension is the gate. The browser's declared MIME type is never
+ *    trusted — it is derived from the extension, so the stored value cannot be
+ *    forged.
+ *  · Nothing user-controlled reaches a path. The original name is a database
+ *    column; the object is a UUID.
+ *  · The bucket is private. Downloads are short-lived signed URLs issued only
+ *    after the scope check, and always as attachments.
  */
 
 var crypto = require('crypto');
-var fs = require('fs');
-var multer = require('multer');
 var path = require('path');
+var sql = require('./sql');
+var supabase = require('./supabase');
 
-var UPLOAD_DIR = path.join(__dirname, '..', 'data', 'uploads');
-var MAX_BYTES = 10 * 1024 * 1024;
+var BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'attachments';
+var MAX_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 10 * 1024 * 1024);
+var UPLOAD_URL_TTL = 120;     // seconds to start the upload
+var DOWNLOAD_URL_TTL = 60;    // seconds a download link stays valid
 
 // Extension → the MIME we record for it. The client's Content-Type is ignored.
 var ALLOWED = {
@@ -39,97 +48,175 @@ var ALLOWED = {
 var EXTENSIONS = Object.keys(ALLOWED);
 var ACCEPT_ATTRIBUTE = EXTENSIONS.join(',');
 
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+function conflict(message) {
+  var err = new Error(message);
+  err.status = 400;
+  return err;
+}
 
 /** The extension of the name the user gave us, lowercased. Never used as a path. */
 function extensionOf(originalName) {
   return path.extname(String(originalName || '')).toLowerCase();
 }
 
-function isAllowed(originalName) {
-  return Object.prototype.hasOwnProperty.call(ALLOWED, extensionOf(originalName));
-}
-
-var storage = multer.diskStorage({
-  destination: function (req, file, cb) { cb(null, UPLOAD_DIR); },
-  filename: function (req, file, cb) {
-    // basename() on our own generated string is belt-and-braces: the name is a
-    // UUID plus an extension already checked against the allowlist.
-    cb(null, path.basename(crypto.randomUUID() + extensionOf(file.originalname)));
-  }
-});
-
-function fileFilter(req, file, cb) {
-  if (!isAllowed(file.originalname)) {
-    var err = new Error('Only ' + EXTENSIONS.join(', ') + ' files can be attached.');
-    err.status = 400;
-    err.code = 'FT_BAD_FILE_TYPE';
-    return cb(err);
-  }
-  cb(null, true);
-}
-
-// One optional file per comment, under the field name "attachment"
-var single = multer({
-  storage: storage,
-  fileFilter: fileFilter,
-  limits: { fileSize: MAX_BYTES, files: 1, fields: 10 }
-}).single('attachment');
-
-/**
- * Wrap multer so its own errors arrive as 400s with a sentence worth reading,
- * rather than reaching the generic handler as a 500.
- */
-function accept(req, res, next) {
-  single(req, res, function (err) {
-    if (!err) return next();
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      err.status = 400;
-      err.message = 'That file is larger than ' + Math.round(MAX_BYTES / 1024 / 1024) + 'MB.';
-    } else if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
-      err.status = 400;
-      err.message = 'Attach at most one file.';
-    } else if (!err.status) {
-      err.status = 400;
-    }
-    next(err);
-  });
+function mimeFor(originalName) {
+  return ALLOWED[extensionOf(originalName)] || null;
 }
 
 /**
- * multer writes to disk before the route runs, so anything that rejects the
- * request afterwards has to clean up or the directory fills with orphans.
+ * Step 1 — issue a signed upload URL.
+ *
+ * The caller has already proved they may comment on this delay; this only
+ * validates the file itself and reserves a path.
  */
-function discard(file) {
-  if (!file || !file.path) return;
-  fs.unlink(file.path, function () { /* already gone is fine */ });
-}
+async function createUploadTicket(person, originalName, declaredBytes) {
+  var filename = String(originalName || '').trim().slice(0, 255);
+  var mime = mimeFor(filename);
 
-/** The row to insert for an accepted upload. MIME comes from our table, not the client. */
-function describe(file) {
+  if (!mime) {
+    throw conflict('Only ' + EXTENSIONS.join(', ') + ' files can be attached.');
+  }
+  var bytes = Number(declaredBytes);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    throw conflict('The file appears to be empty.');
+  }
+  if (bytes > MAX_BYTES) {
+    throw conflict('That file is larger than ' + Math.round(MAX_BYTES / 1024 / 1024) + 'MB.');
+  }
+
+  // A UUID path, namespaced by the uploader so Storage policies can scope by
+  // owner later without a schema change.
+  var objectPath = person.id + '/' + crypto.randomUUID() + extensionOf(filename);
+
+  var signed = await supabase.admin.storage.from(BUCKET)
+    .createSignedUploadUrl(objectPath, { upsert: false });
+
+  if (signed.error) {
+    throw new Error('Could not prepare the upload: ' + signed.error.message);
+  }
+
+  await sql.run(
+    `INSERT INTO pending_uploads (object_path, person_id, filename, mime)
+     VALUES ($1, $2, $3, $4)`,
+    [objectPath, person.id, filename, mime]);
+
   return {
-    filename: String(file.originalname || 'attachment').slice(0, 255),
-    stored_name: file.filename,
-    mime: ALLOWED[extensionOf(file.originalname)] || 'application/octet-stream',
-    bytes: file.size
+    objectPath: objectPath,
+    uploadUrl: signed.data.signedUrl,
+    token: signed.data.token,
+    bucket: BUCKET,
+    expiresInSeconds: UPLOAD_URL_TTL,
+    maxBytes: MAX_BYTES
   };
 }
 
-function pathOf(storedName) {
-  // Resolve and re-check: a stored_name should always be a bare UUID, but this
-  // is the one place a database value becomes a filesystem path.
-  var full = path.join(UPLOAD_DIR, path.basename(String(storedName)));
-  if (path.dirname(path.resolve(full)) !== path.resolve(UPLOAD_DIR)) return null;
-  return full;
+/**
+ * Step 3 — verify an uploaded object before a comment claims it.
+ *
+ * Checks the reservation, the uploader, and then the object as Storage
+ * actually sees it: a client could have reserved a 1KB .pdf and uploaded 50MB
+ * of something else, so the declared size is re-read rather than believed.
+ */
+async function claimUpload(person, objectPath, runner) {
+  var db = runner || sql;
+  if (!objectPath) return null;
+
+  var pending = await db.one(
+    'SELECT * FROM pending_uploads WHERE object_path = $1', [String(objectPath)]);
+
+  if (!pending) throw conflict('That upload was not recognised. Attach the file again.');
+  if (pending.person_id !== person.id) throw conflict('That upload belongs to someone else.');
+  if (pending.claimed_at) throw conflict('That upload has already been attached.');
+
+  // What Storage actually holds, not what the client claimed
+  var dir = path.posix.dirname(objectPath);
+  var base = path.posix.basename(objectPath);
+  var listed = await supabase.admin.storage.from(BUCKET)
+    .list(dir, { search: base, limit: 1 });
+
+  if (listed.error) throw new Error('Could not verify the upload: ' + listed.error.message);
+  var object = (listed.data || []).filter(function (o) { return o.name === base; })[0];
+  if (!object) throw conflict('The file was not uploaded. Try attaching it again.');
+
+  var bytes = Number(object.metadata && object.metadata.size);
+  if (!Number.isFinite(bytes) || bytes <= 0) throw conflict('The uploaded file is empty.');
+  if (bytes > MAX_BYTES) {
+    await remove(objectPath);
+    throw conflict('That file is larger than ' + Math.round(MAX_BYTES / 1024 / 1024) + 'MB.');
+  }
+
+  await db.run('UPDATE pending_uploads SET claimed_at = now() WHERE object_path = $1', [objectPath]);
+
+  return {
+    filename: pending.filename,
+    object_path: objectPath,
+    mime: pending.mime,        // derived from the extension, never the client
+    bytes: bytes
+  };
+}
+
+/**
+ * A short-lived download link. `download` makes Supabase send
+ * Content-Disposition: attachment, so a stored file can never be rendered in
+ * this app's origin — the protection the streaming version provided.
+ */
+async function signedDownloadUrl(objectPath, filename) {
+  var signed = await supabase.admin.storage.from(BUCKET)
+    .createSignedUrl(objectPath, DOWNLOAD_URL_TTL, { download: filename || true });
+
+  if (signed.error) {
+    var err = new Error('No such attachment');
+    err.status = 404;
+    throw err;
+  }
+  return signed.data.signedUrl;
+}
+
+async function remove(objectPath) {
+  try {
+    await supabase.admin.storage.from(BUCKET).remove([objectPath]);
+  } catch (err) {
+    console.error('[storage] could not remove ' + objectPath + ':', err.message);
+  }
+}
+
+/**
+ * Sweep uploads that were reserved but never attached — a user who picked a
+ * file and then closed the tab. Run by the cron.
+ */
+async function sweepUnclaimed(olderThanHours) {
+  var hours = String(olderThanHours || 24);
+  var stale = await sql.many(
+    `SELECT object_path FROM pending_uploads
+      WHERE claimed_at IS NULL AND created_at < now() - ($1 || ' hours')::interval
+      LIMIT 200`, [hours]);
+
+  if (!stale.length) return 0;
+  var paths = stale.map(function (r) { return r.object_path; });
+
+  await supabase.admin.storage.from(BUCKET).remove(paths);
+  await sql.run('DELETE FROM pending_uploads WHERE object_path = ANY($1::text[])', [paths]);
+  return paths.length;
+}
+
+/** Claimed rows whose comment is long gone — tidy the bookkeeping table. */
+async function sweepClaimed(olderThanDays) {
+  return sql.run(
+    `DELETE FROM pending_uploads
+      WHERE claimed_at IS NOT NULL AND claimed_at < now() - ($1 || ' days')::interval`,
+    [String(olderThanDays || 7)]);
 }
 
 module.exports = {
-  UPLOAD_DIR: UPLOAD_DIR,
+  BUCKET: BUCKET,
   MAX_BYTES: MAX_BYTES,
   EXTENSIONS: EXTENSIONS,
   ACCEPT_ATTRIBUTE: ACCEPT_ATTRIBUTE,
-  accept: accept,
-  discard: discard,
-  describe: describe,
-  pathOf: pathOf
+  mimeFor: mimeFor,
+  createUploadTicket: createUploadTicket,
+  claimUpload: claimUpload,
+  signedDownloadUrl: signedDownloadUrl,
+  remove: remove,
+  sweepUnclaimed: sweepUnclaimed,
+  sweepClaimed: sweepClaimed
 };

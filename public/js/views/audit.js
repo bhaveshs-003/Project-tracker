@@ -5,8 +5,15 @@
 import { api } from '../api.js';
 import { escapeHtml, formatDateTime, plural } from '../format.js';
 
+// The trail is no longer capped at 500 rows — retention is by age now — so the
+// endpoint pages. This loads the most recent window; the filters below work
+// within it rather than querying the server.
+const PAGE_SIZE = 200;
+
 export async function renderAudit(mount) {
-  const entries = await api.get('/api/audit');
+  const page = await api.get(`/api/audit?limit=${PAGE_SIZE}`);
+  const entries = page.entries;
+  const hasMore = page.nextBefore != null;
 
   const categories = [...new Set(entries.map(e => e.category))].sort();
 
@@ -70,7 +77,8 @@ export async function renderAudit(mount) {
         <td>${escapeHtml(e.actorName)}<span class="row-sub">${escapeHtml(e.actorRole)}</span></td>
       </tr>`).join('');
 
-    count.textContent = `${plural(list.length, 'entry').replace('entrys', 'entries')} of ${entries.length}`;
+    count.textContent = `${plural(list.length, 'entry').replace('entrys', 'entries')} of ${entries.length}` +
+      (hasMore ? ` · showing the most recent ${PAGE_SIZE}` : '');
     empty.classList.toggle('hidden', list.length > 0);
   }
 

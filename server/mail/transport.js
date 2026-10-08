@@ -15,9 +15,9 @@
  *   MAIL_TRANSPORT=smtp
  *   SMTP_HOST=smtp.gmail.com
  *   SMTP_PORT=587                      # STARTTLS. For 465 set SMTP_SECURE=true
- *   SMTP_USER=abishek.m@makoitlab.com
+ *   SMTP_USER=you@example.com
  *   SMTP_PASS=<16-char Google App Password, NOT the login password>
- *   MAIL_FROM='Functional Tool <abishek.m@makoitlab.com>'
+ *   MAIL_FROM='Functional Tool <noreply@example.com>'
  *
  * MAIL_FROM must match SMTP_USER (or a verified "Send mail as" alias) — Google
  * silently rewrites a From header it does not recognise.
@@ -27,7 +27,7 @@
  * a Workspace admin has disabled them org-wide.
  *
  * Test the credentials on their own with:
- *   node scripts/send-test-email.js bhavesh.s@makoitlab.com
+ *   node scripts/send-test-email.js someone@example.com
  *
  * MAIL_ALLOWLIST is the staging safety net: with a real SMTP server configured,
  * only the listed addresses are actually sent to. Everything else is recorded
@@ -42,7 +42,7 @@ var OUTBOX_DIR = path.join(__dirname, '..', '..', 'data', 'outbox');
 var config = {
   transport: process.env.MAIL_TRANSPORT || 'log',
   // Notifications come from the admin's own address, so replies reach a person.
-  from: process.env.MAIL_FROM || 'Functional Tool <abishek.m@makoitlab.com>',
+  from: process.env.MAIL_FROM || 'Functional Tool <noreply@example.com>',
   appUrl: (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, ''),
   allowlist: (process.env.MAIL_ALLOWLIST || '')
     .split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean)

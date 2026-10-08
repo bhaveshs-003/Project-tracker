@@ -1,15 +1,28 @@
 {
   "name": "functional-tool",
   "version": "1.0.0",
-  "description": "Project tracking tool — static frontend plus a small auth backend",
+  "description": "Project tracking with partner approval and delay negotiation — Express, Supabase Postgres, Supabase Auth and Storage",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "seed": "node scripts/seed.js",
+    "migrate": "node scripts/migrate.js",
+    "test": "node tests/run.js",
+    "test:api": "node tests/api.test.js",
+    "test:perf": "node tests/performance.test.js",
+    "test:concurrency": "node tests/concurrency.test.js",
+    "test:schema": "node tests/schema.test.js"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
+    "@supabase/supabase-js": "^2.117.3",
     "express": "^4.19.2",
-    "multer": "^2.3.0",
-    "nodemailer": "^9.1.1"
+    "helmet": "^8.3.0",
+    "jose": "^5.10.0",
+    "nodemailer": "^9.1.1",
+    "pg": "^8.23.1",
+    "zod": "^3.25.76"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }

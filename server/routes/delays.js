@@ -3,13 +3,16 @@
  *
  * The shape mirrors every other route file here — resolve through scope.js
  * first, so an item the caller may not see 404s before any rule runs, then ask
- * rules.js whether the move is legal. The upload is written to disk by multer
- * before we get here, so anything that rejects the request has to discard it.
+ * rules.js whether the move is legal.
+ *
+ * Attachments no longer pass through this process. The browser asks for a
+ * signed upload URL (permission is checked there, before anything is issued),
+ * PUTs the bytes straight to Supabase Storage, and then names the object when
+ * it posts the comment. See server/uploads.js for why.
  */
 
 var express = require('express');
-var fs = require('fs');
-var db = require('../db').db;
+var sql = require('../sql');
 var guards = require('../guards');
 var scope = require('../scope');
 var rules = require('../rules');
@@ -17,180 +20,203 @@ var uploads = require('../uploads');
 var serialise = require('../serialise');
 var audit = require('../audit');
 var notify = require('../mail/notify');
+var v = require('../validate');
 
 var router = express.Router();
-router.use(guards.requireAuth);
+var asyncHandler = v.asyncHandler;
 
-var now = function () { return new Date().toISOString(); };
-var today = function () { return new Date().toISOString().slice(0, 10); };
+router.use(guards.requireAuth);
 
 /**
  * Resolve :itemType/:itemId to the delayed row plus its milestone and project,
- * or throw. A sub-task id is looked up through its own milestone, so an id from
- * a different project cannot be smuggled in.
+ * or throw. A sub-task id is looked up through its own milestone, so an id
+ * from a different project cannot be smuggled in.
  */
-function resolveTarget(user, itemType, itemId) {
+async function resolveTarget(user, itemType, itemId) {
   var milestone;
   if (itemType === 'milestone') {
-    milestone = scope.loadVisibleMilestone(user, itemId);
+    milestone = await scope.loadVisibleMilestone(user, itemId);
   } else if (itemType === 'subtask') {
-    milestone = scope.loadVisibleSubtask(user, itemId).milestone;
+    milestone = (await scope.loadVisibleSubtask(user, itemId)).milestone;
   } else {
     var bad = new Error('No such item');
     bad.status = 404;
     throw bad;
   }
-  var project = db.prepare('SELECT * FROM projects WHERE id = ?').get(milestone.project_id);
+
   return {
     milestone: milestone,
-    project: project,
-    item: rules.findDelayedItem(milestone, itemType, itemId)
+    project: await sql.one('SELECT * FROM projects WHERE id = $1', [milestone.project_id]),
+    item: await rules.findDelayedItem(milestone, itemType, itemId)
   };
 }
 
 /** Insert the comment and its attachment together, or neither. */
-function writeComment(target, user, fields) {
-  var commentId = db.prepare(`INSERT INTO delay_comments
-    (item_type, item_id, milestone_id, project_id, author_id, author_role, decision, body, created_at)
-    VALUES (@item_type, @item_id, @milestone_id, @project_id, @author_id, @author_role,
-            @decision, @body, @created_at)`).run({
-    item_type: fields.itemType,
-    item_id: Number(fields.itemId),
-    milestone_id: target.milestone.id,
-    project_id: target.project.id,
-    author_id: user.id,
-    author_role: user.role,
-    decision: fields.decision || '',
-    body: fields.body,
-    created_at: now()
-  }).lastInsertRowid;
+async function writeComment(t, target, user, fields) {
+  var comment = await t.one(
+    `INSERT INTO delay_comments
+       (item_type, item_id, milestone_id, project_id, author_id, author_role, decision, body)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+    [fields.itemType, Number(fields.itemId), target.milestone.id, target.project.id,
+      user.id, user.role, fields.decision || '', fields.body]);
 
-  if (fields.file) {
-    var described = uploads.describe(fields.file);
-    db.prepare(`INSERT INTO attachments
-      (comment_id, filename, stored_name, mime, bytes, created_at)
-      VALUES (@comment_id, @filename, @stored_name, @mime, @bytes, @created_at)`)
-      .run(Object.assign({ comment_id: commentId, created_at: now() }, described));
+  if (fields.attachment) {
+    await t.run(
+      `INSERT INTO attachments (comment_id, filename, object_path, mime, bytes)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [comment.id, fields.attachment.filename, fields.attachment.object_path,
+        fields.attachment.mime, fields.attachment.bytes]);
   }
-  return commentId;
+  return comment.id;
 }
 
-function sendMilestone(res, user, milestoneId) {
-  res.json(serialise.milestone(
-    db.prepare('SELECT * FROM milestones WHERE id = ?').get(milestoneId), user));
+async function sendMilestone(res, user, milestoneId) {
+  res.json(await serialise.milestone(
+    await sql.one('SELECT * FROM milestones WHERE id = $1', [milestoneId]), user));
 }
 
-// ---------------------------------------------------------------
-// Accept or deny — Partner POC only, while the milestone is pending
-// ---------------------------------------------------------------
-router.post('/:itemType/:itemId/decision', uploads.accept, function (req, res, next) {
-  try {
-    var body = req.body || {};
-    var target = resolveTarget(req.user, req.params.itemType, req.params.itemId);
-    var decision = String(body.decision || '');
-
-    rules.assertCanDecideDelay(req.user, target.milestone, target.item, decision,
-      scope.isProjectPoc(req.user, target.project.id));
-
-    // A denial has to say why. An acceptance may simply be an acceptance.
-    var text = String(body.body || '').trim();
-    if (decision === 'denied' && !text) {
-      var err = new Error('Say why you are denying this delay.');
-      err.status = 409;
-      throw err;
-    }
-
-    var table = req.params.itemType === 'milestone' ? 'milestones' : 'subtasks';
-    var commentId;
-
-    db.transaction(function () {
-      db.prepare('UPDATE ' + table + ' SET delay_status = ?, delay_decided_by = ?, delay_decided_at = ? WHERE id = ?')
-        .run(decision, req.user.id, today(), target.item.row.id);
-
-      commentId = writeComment(target, req.user, {
-        itemType: req.params.itemType, itemId: req.params.itemId,
-        decision: decision, body: text, file: req.file
-      });
-
-      if (decision === 'denied') {
-        notify.delayDenied(target.project, target.milestone, req.user, target.item, text, commentId, !!req.file);
-      }
-    })();
-
-    audit.record(req.user, 'Approval', decision === 'denied' ? 'Delay denied' : 'Delay accepted',
-      target.item.title, target.project.code, target.project.id);
-    sendMilestone(res, req.user, target.milestone.id);
-  } catch (e) {
-    uploads.discard(req.file);          // multer already wrote it; nothing owns it now
-    next(e);
-  }
+var commentBody = v.z.object({
+  body: v.optionalText(5000),
+  objectPath: v.z.string().max(300).optional().default('')
 });
 
 // ---------------------------------------------------------------
-// Reply — admin on a denied delay, or the partner on their own open thread
+// Step 1 of an upload — permission first, signed URL second
 // ---------------------------------------------------------------
-router.post('/:itemType/:itemId/comments', uploads.accept, function (req, res, next) {
-  try {
-    var body = req.body || {};
-    var target = resolveTarget(req.user, req.params.itemType, req.params.itemId);
+router.post('/:itemType/:itemId/upload-url', asyncHandler(async function (req, res) {
+  var input = v.body(v.z.object({
+    filename: v.text('File name', 255),
+    bytes: v.z.coerce.number().int().positive()
+  }), req);
 
-    if (req.user.role === 'partner' && !scope.isProjectPoc(req.user, target.project.id)) {
+  var target = await resolveTarget(req.user, req.params.itemType, req.params.itemId);
+
+  // The same gates as the write that will follow. Issuing an upload URL to
+  // somebody who could not then post the comment would let any signed-in user
+  // put objects in the bucket.
+  if (req.user.role === 'partner') {
+    rules.assertCanReplyToDelay(req.user, target.milestone, target.item);
+    if (!(await scope.isProjectPoc(req.user, target.project.id))) {
       var forbidden = new Error('You are not a Partner POC on this project.');
       forbidden.status = 403;
       throw forbidden;
     }
-
+  } else {
     rules.assertCanReplyToDelay(req.user, target.milestone, target.item);
-    rules.assertCommentHasSubstance(body.body, !!req.file);
-
-    var text = String(body.body || '').trim();
-    var commentId;
-
-    db.transaction(function () {
-      commentId = writeComment(target, req.user, {
-        itemType: req.params.itemType, itemId: req.params.itemId,
-        decision: '', body: text, file: req.file
-      });
-
-      if (req.user.role === 'admin') {
-        notify.delayReplied(target.project, target.milestone, req.user, target.item, text, commentId, !!req.file);
-      }
-    })();
-
-    audit.record(req.user, 'Approval', 'Delay comment', target.item.title,
-      target.project.code, target.project.id);
-    sendMilestone(res, req.user, target.milestone.id);
-  } catch (e) {
-    uploads.discard(req.file);
-    next(e);
   }
-});
+
+  res.json(await uploads.createUploadTicket(req.person, input.filename, input.bytes));
+}));
+
+// ---------------------------------------------------------------
+// Accept or deny — Partner POC only, while the milestone is pending
+// ---------------------------------------------------------------
+router.post('/:itemType/:itemId/decision', asyncHandler(async function (req, res) {
+  var input = v.body(commentBody.extend({
+    decision: v.z.enum(['accepted', 'denied'], {
+      errorMap: function () { return { message: 'Choose whether you accept or deny this delay.' }; }
+    })
+  }), req);
+
+  var target = await resolveTarget(req.user, req.params.itemType, req.params.itemId);
+
+  rules.assertCanDecideDelay(req.user, target.milestone, target.item, input.decision,
+    await scope.isProjectPoc(req.user, target.project.id));
+
+  // A denial has to say why. An acceptance may simply be an acceptance.
+  if (input.decision === 'denied' && !input.body) {
+    var err = new Error('Say why you are denying this delay.');
+    err.status = 409;
+    throw err;
+  }
+
+  var table = req.params.itemType === 'milestone' ? 'milestones' : 'subtasks';
+
+  await sql.tx(async function (t) {
+    var attachment = input.objectPath
+      ? await uploads.claimUpload(req.person, input.objectPath, t) : null;
+
+    await t.run(
+      'UPDATE ' + table + ' SET delay_status = $1, delay_decided_by = $2, ' +
+      'delay_decided_at = current_date WHERE id = $3',
+      [input.decision, req.user.id, target.item.row.id]);
+
+    var commentId = await writeComment(t, target, req.user, {
+      itemType: req.params.itemType, itemId: req.params.itemId,
+      decision: input.decision, body: input.body, attachment: attachment
+    });
+
+    if (input.decision === 'denied') {
+      await notify.delayDenied(t, target.project, target.milestone, req.user,
+        target.item, input.body, commentId, !!attachment);
+    }
+  });
+
+  await audit.record(req.user, 'Approval',
+    input.decision === 'denied' ? 'Delay denied' : 'Delay accepted',
+    target.item.title, target.project.code, target.project.id);
+  await sendMilestone(res, req.user, target.milestone.id);
+}));
+
+// ---------------------------------------------------------------
+// Reply — admin on a denied delay, or the partner on their own open thread
+// ---------------------------------------------------------------
+router.post('/:itemType/:itemId/comments', asyncHandler(async function (req, res) {
+  var input = v.body(commentBody, req);
+  var target = await resolveTarget(req.user, req.params.itemType, req.params.itemId);
+
+  if (req.user.role === 'partner' && !(await scope.isProjectPoc(req.user, target.project.id))) {
+    var forbidden = new Error('You are not a Partner POC on this project.');
+    forbidden.status = 403;
+    throw forbidden;
+  }
+
+  rules.assertCanReplyToDelay(req.user, target.milestone, target.item);
+  rules.assertCommentHasSubstance(input.body, !!input.objectPath);
+
+  await sql.tx(async function (t) {
+    var attachment = input.objectPath
+      ? await uploads.claimUpload(req.person, input.objectPath, t) : null;
+
+    var commentId = await writeComment(t, target, req.user, {
+      itemType: req.params.itemType, itemId: req.params.itemId,
+      decision: '', body: input.body, attachment: attachment
+    });
+
+    if (req.user.role === 'admin') {
+      await notify.delayReplied(t, target.project, target.milestone, req.user,
+        target.item, input.body, commentId, !!attachment);
+    }
+  });
+
+  await audit.record(req.user, 'Approval', 'Delay comment', target.item.title,
+    target.project.code, target.project.id);
+  await sendMilestone(res, req.user, target.milestone.id);
+}));
 
 // ---------------------------------------------------------------
 // Download — the only way an uploaded file is ever reachable
 // ---------------------------------------------------------------
-router.get('/attachments/:id', function (req, res, next) {
-  try {
-    var row = db.prepare(`SELECT a.*, c.project_id FROM attachments a
-      JOIN delay_comments c ON c.id = a.comment_id WHERE a.id = ?`).get(req.params.id);
+router.get('/attachments/:id', asyncHandler(async function (req, res) {
+  var id = Number(req.params.id);
+  var row = Number.isInteger(id) ? await sql.one(
+    `SELECT a.*, c.project_id FROM attachments a
+       JOIN delay_comments c ON c.id = a.comment_id
+      WHERE a.id = $1`, [id]) : null;
 
-    // 404 rather than 403 for an out-of-scope project, matching scope.js: an
-    // attachment id should not reveal that somebody else's project exists.
-    if (!row) return res.status(404).json({ error: 'No such attachment' });
-    scope.loadVisibleProject(req.user, row.project_id);
+  // 404 rather than 403 for an out-of-scope project, matching scope.js: an
+  // attachment id should not reveal that somebody else's project exists.
+  if (!row) return res.status(404).json({ error: 'No such attachment' });
+  await scope.loadVisibleProject(req.user, row.project_id);
 
-    var file = uploads.pathOf(row.stored_name);
-    if (!file || !fs.existsSync(file)) return res.status(404).json({ error: 'No such attachment' });
+  // A 60-second link, issued only after that check. `download` makes Supabase
+  // send Content-Disposition: attachment, so a stored file can never render in
+  // this app's origin — the protection the streaming version provided.
+  var url = await uploads.signedDownloadUrl(row.object_path, row.filename);
 
-    // Always a download, never rendered. A stored file served inline from this
-    // origin would be script execution with our cookies attached.
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Disposition',
-      'attachment; filename="' + row.filename.replace(/[^\w.\- ]/g, '_') + '"; ' +
-      "filename*=UTF-8''" + encodeURIComponent(row.filename));
-    res.sendFile(file);
-  } catch (e) { next(e); }
-});
+  // 302 for a plain <a download>; JSON for a fetch that wants the URL itself.
+  if (String(req.query.json) === '1') return res.json({ url: url, filename: row.filename });
+  res.redirect(302, url);
+}));
 
 module.exports = router;

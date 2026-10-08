@@ -1,55 +1,85 @@
 /**
  * The outbox.
  *
- * enqueue() is a local SQLite insert, so it can safely run inside the same
- * transaction as the state change that caused it: the approval and the intent
- * to notify commit together, or neither does.
+ * enqueue() is an ordinary INSERT, so it runs inside the same transaction as
+ * the state change that caused it: the approval and the intent to notify
+ * commit together, or neither does. That property is the whole point and is
+ * unchanged from the SQLite version — which is why enqueue takes the
+ * transaction handle.
  *
- * drain() runs separately on a timer. Nothing in the request path ever waits on
- * a mail server, and a failed send is retried rather than lost.
+ * What changed is draining. There is no long-running process on serverless, so
+ * setInterval is gone and a cron calls drain() instead. Two cron invocations
+ * can overlap, so rows are now *claimed* before they are sent:
+ *
+ *   UNIQUE dedupe_key  stops the same message being enqueued twice.
+ *   locked_until       stops a queued message being sent twice.
+ *
+ * Those are different races. The old worker only had the first.
  */
 
-var db = require('../db').db;
+var sql = require('../sql');
 var transport = require('./transport');
 
 var MAX_ATTEMPTS = 5;
 var BATCH = 20;
+var LOCK_MINUTES = 2;
 
 /**
  * Queue one message. Returns true if it was queued, false if an identical one
  * already exists — the UNIQUE dedupe_key does the work, so callers do not need
  * to check first and cannot race.
+ *
+ * `runner` is a sql.tx handle when enqueueing inside a transaction.
  */
-function enqueue(entry) {
-  var result = db.prepare(`
-    INSERT OR IGNORE INTO emails
-      (event, dedupe_key, to_email, to_name, subject, text_body, html_body,
-       project_id, milestone_id, created_at, next_attempt_at)
-    VALUES (@event, @dedupeKey, @to, @toName, @subject, @text, @html,
-            @projectId, @milestoneId, @createdAt, 0)`).run({
-    event: entry.event,
-    dedupeKey: entry.dedupeKey,
-    to: entry.to,
-    toName: entry.toName || '',
-    subject: entry.subject,
-    text: entry.text,
-    html: entry.html || '',
-    projectId: entry.projectId || null,
-    milestoneId: entry.milestoneId || null,
-    createdAt: new Date().toISOString()
-  });
-  return result.changes > 0;
+async function enqueue(entry, runner) {
+  var db = runner || sql;
+  var inserted = await db.run(
+    `INSERT INTO emails
+       (event, dedupe_key, to_email, to_name, subject, text_body, html_body,
+        project_id, milestone_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (dedupe_key) DO NOTHING`,
+    [
+      entry.event,
+      entry.dedupeKey,
+      entry.to,
+      entry.toName || '',
+      entry.subject,
+      entry.text,
+      entry.html || '',
+      entry.projectId || null,
+      entry.milestoneId || null
+    ]);
+  return inserted > 0;
 }
 
 /** Exponential backoff: ~1, 2, 4, 8, 16 minutes. */
-function backoffMs(attempts) {
-  return Math.pow(2, attempts - 1) * 60 * 1000;
+function backoffMinutes(attempts) {
+  return Math.pow(2, attempts - 1);
 }
 
-function pending(limit) {
-  return db.prepare(`SELECT * FROM emails
-    WHERE status != 'sent' AND attempts < ? AND next_attempt_at <= ?
-    ORDER BY id LIMIT ?`).all(MAX_ATTEMPTS, Date.now(), limit || BATCH);
+/**
+ * Take ownership of up to `limit` due messages.
+ *
+ * SKIP LOCKED is what makes concurrent drains safe: a second invocation walks
+ * past rows the first is already holding instead of blocking on them or — far
+ * worse — selecting them and sending a duplicate.
+ */
+async function claim(runner, limit) {
+  return runner.many(
+    `UPDATE emails SET locked_until = now() + ($2 || ' minutes')::interval
+      WHERE id IN (
+        SELECT id FROM emails
+         WHERE status <> 'sent'
+           AND attempts < $3
+           AND next_attempt_at <= now()
+           AND (locked_until IS NULL OR locked_until < now())
+         ORDER BY id
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED
+      )
+      RETURNING *`,
+    [limit || BATCH, String(LOCK_MINUTES), MAX_ATTEMPTS]);
 }
 
 async function deliver(row) {
@@ -61,24 +91,33 @@ async function deliver(row) {
       text: row.text_body,
       html: row.html_body
     });
-    db.prepare(`UPDATE emails SET status = 'sent', attempts = attempts + 1,
-      last_error = '', sent_at = ? WHERE id = ?`).run(new Date().toISOString(), row.id);
+    await sql.run(
+      `UPDATE emails SET status = 'sent', attempts = attempts + 1, last_error = '',
+              sent_at = now(), locked_until = NULL
+        WHERE id = $1`, [row.id]);
     return true;
   } catch (err) {
     var attempts = row.attempts + 1;
-    db.prepare(`UPDATE emails SET status = 'failed', attempts = ?, last_error = ?,
-      next_attempt_at = ? WHERE id = ?`)
-      .run(attempts, String(err && err.message || err).slice(0, 500),
-        Date.now() + backoffMs(attempts), row.id);
+    await sql.run(
+      `UPDATE emails SET status = 'failed', attempts = $2, last_error = $3,
+              next_attempt_at = now() + ($4 || ' minutes')::interval,
+              locked_until = NULL
+        WHERE id = $1`,
+      [row.id, attempts, String(err && err.message || err).slice(0, 500),
+        String(backoffMinutes(attempts))]);
+
     console.error('[mail] attempt ' + attempts + '/' + MAX_ATTEMPTS +
       ' failed for #' + row.id + ' → ' + row.to_email + ': ' + (err && err.message));
     return false;
   }
 }
 
-/** Send whatever is due. Returns { sent, failed }. */
+/** Send whatever is due. Returns { sent, failed, considered }. */
 async function drain(limit) {
-  var rows = pending(limit);
+  // The claim commits before any sending starts, so the lock is visible to a
+  // concurrent drain even while this one is still talking to the mail server.
+  var rows = await sql.tx(function (t) { return claim(t, limit); });
+
   var sent = 0, failed = 0;
   for (var i = 0; i < rows.length; i++) {
     // Sequential on purpose: a queue this size gains nothing from concurrency,
@@ -89,30 +128,14 @@ async function drain(limit) {
   return { sent: sent, failed: failed, considered: rows.length };
 }
 
-var timer = null;
-
-function startWorker(intervalMs) {
-  if (timer) return timer;
-  var every = intervalMs || 15000;
-
-  var tick = function () {
-    drain().catch(function (err) { console.error('[mail] worker error:', err.message); });
-  };
-
-  tick();                                   // pick up anything left from a previous run
-  timer = setInterval(tick, every);
-  if (timer.unref) timer.unref();           // never hold the process open
-  console.log('[mail] outbox worker every ' + Math.round(every / 1000) + 's, transport=' +
-    transport.config.transport);
-  return timer;
+/** Release locks held by an invocation that died mid-send. */
+async function releaseStaleLocks() {
+  return sql.run(
+    "UPDATE emails SET locked_until = NULL WHERE locked_until IS NOT NULL AND locked_until < now()");
 }
 
-function stopWorker() {
-  if (timer) { clearInterval(timer); timer = null; }
-}
-
-function stats() {
-  var rows = db.prepare('SELECT status, COUNT(*) AS n FROM emails GROUP BY status').all();
+async function stats() {
+  var rows = await sql.many('SELECT status, count(*)::int AS n FROM emails GROUP BY status');
   var out = { queued: 0, sent: 0, failed: 0 };
   rows.forEach(function (r) { out[r.status] = r.n; });
   return out;
@@ -121,9 +144,8 @@ function stats() {
 module.exports = {
   enqueue: enqueue,
   drain: drain,
-  pending: pending,
-  startWorker: startWorker,
-  stopWorker: stopWorker,
+  releaseStaleLocks: releaseStaleLocks,
   stats: stats,
-  MAX_ATTEMPTS: MAX_ATTEMPTS
+  MAX_ATTEMPTS: MAX_ATTEMPTS,
+  BATCH: BATCH
 };

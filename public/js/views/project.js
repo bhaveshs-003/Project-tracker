@@ -1089,6 +1089,32 @@ function composerError(form, message) {
 }
 
 /**
+ * Send the file straight to storage, and return the path the comment should
+ * claim.
+ *
+ * Three steps rather than one multipart POST, because the API runs as a
+ * serverless function and those cap a request body at 4.5MB — a 10MB
+ * attachment cannot fit through one. The server checks permission before it
+ * issues the ticket, so this cannot be used to put objects in the bucket
+ * without the right to comment.
+ */
+async function uploadAttachment(kind, id, file, onProgress) {
+  const ticket = await api.post(`/api/delays/${kind}/${id}/upload-url`,
+    { filename: file.name, bytes: file.size });
+
+  if (onProgress) onProgress('Uploading ' + file.name + '…');
+
+  const sent = await fetch(ticket.uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file
+  });
+  if (!sent.ok) throw new Error('The upload did not complete. Try again.');
+
+  return ticket.objectPath;
+}
+
+/**
  * Post one composer. `decision` non-null means accept/deny, which also writes
  * the item's status; null is a plain reply on the thread.
  */
@@ -1105,24 +1131,30 @@ async function submitComposer(button, decision) {
   if (!decision && !body && !file) {
     return composerError(form, 'Write a comment or attach a file.');
   }
-
-  const payload = new FormData();
-  payload.append('body', body);
-  if (decision) payload.append('decision', decision);
-  if (file) payload.append('attachment', file);
+  if (file && file.size > MAX_UPLOAD_BYTES) {
+    return composerError(form, 'That file is larger than 10MB.');
+  }
 
   const buttons = [...form.querySelectorAll('button')];
+  const label = form.querySelector('[data-file-label]');
+  const original = label ? label.textContent : '';
   buttons.forEach(b => { b.disabled = true; });
 
   try {
+    const objectPath = file
+      ? await uploadAttachment(kind, id, file, t => { if (label) label.textContent = t; })
+      : '';
+
     const url = decision
       ? `/api/delays/${kind}/${id}/decision`
       : `/api/delays/${kind}/${id}/comments`;
-    mergeMilestone(await api.postForm(url, payload));
+
+    mergeMilestone(await api.post(url, { body, objectPath, ...(decision ? { decision } : {}) }));
     await refresh();
     if (decision) toast(decision === 'accepted' ? 'Delay accepted.' : 'Delay denied.', 'info');
   } catch (err) {
     buttons.forEach(b => { b.disabled = false; });
+    if (label) label.textContent = original;
     composerError(form, err.message);
   }
 }

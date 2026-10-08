@@ -5,37 +5,46 @@
  */
 
 var express = require('express');
-var db = require('../db').db;
+var sql = require('../sql');
 var guards = require('../guards');
 var outbox = require('../mail/outbox');
 var transport = require('../mail/transport');
+var v = require('../validate');
 
 var router = express.Router();
+var asyncHandler = v.asyncHandler;
+
 router.use(guards.requireAuth, guards.requireRole('admin'));
 
-router.get('/', function (req, res) {
-  var rows = db.prepare(`SELECT id, event, dedupe_key, to_email, to_name, subject,
-      status, attempts, last_error, created_at, sent_at, project_id, milestone_id
-    FROM emails ORDER BY id DESC LIMIT 200`).all();
+router.get('/', asyncHandler(async function (req, res) {
+  var page = v.query(v.pagination, req);
+
+  var rows = await sql.many(
+    `SELECT id, event, dedupe_key, to_email, to_name, subject, status, attempts,
+            last_error, created_at, sent_at, next_attempt_at, locked_until,
+            project_id, milestone_id
+       FROM emails ORDER BY id DESC LIMIT $1`, [page.limit]);
 
   res.json({
     transport: transport.config.transport,
     from: transport.config.from,
-    stats: outbox.stats(),
+    stats: await outbox.stats(),
     emails: rows
   });
-});
+}));
 
 // The full body of one message, for reading what actually went out
-router.get('/:id', function (req, res) {
-  var row = db.prepare('SELECT * FROM emails WHERE id = ?').get(req.params.id);
+router.get('/:id', asyncHandler(async function (req, res) {
+  var id = Number(req.params.id);
+  var row = Number.isInteger(id)
+    ? await sql.one('SELECT * FROM emails WHERE id = $1', [id]) : null;
   if (!row) return res.status(404).json({ error: 'No such email' });
   res.json(row);
-});
+}));
 
-// Push anything due through immediately rather than waiting for the next tick
-router.post('/drain', function (req, res, next) {
-  outbox.drain().then(function (result) { res.json(result); }).catch(next);
-});
+// Push anything due through immediately rather than waiting for the cron
+router.post('/drain', asyncHandler(async function (req, res) {
+  res.json(await outbox.drain());
+}));
 
 module.exports = router;

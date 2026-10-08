@@ -26,3 +26,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Test artefacts
+.test-output/

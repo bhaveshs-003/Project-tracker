@@ -1,7 +1,7 @@
 /**
  * Send one real email, to prove the SMTP credentials work.
  *
- *   node scripts/send-test-email.js bhavesh.s@makoitlab.com
+ *   node scripts/send-test-email.js someone@example.com
  *
  * This deliberately bypasses the outbox and the app entirely. If it fails, the
  * problem is the SMTP configuration and nothing else — which is the whole point
@@ -12,10 +12,10 @@
  *   export MAIL_TRANSPORT=smtp
  *   export SMTP_HOST=smtp.gmail.com
  *   export SMTP_PORT=587
- *   export SMTP_USER=abishek.m@makoitlab.com
+ *   export SMTP_USER=you@example.com
  *   export SMTP_PASS='xxxx xxxx xxxx xxxx'     # App Password; spaces are fine
- *   export MAIL_FROM='Functional Tool <abishek.m@makoitlab.com>'
- *   node scripts/send-test-email.js bhavesh.s@makoitlab.com
+ *   export MAIL_FROM='Functional Tool <noreply@example.com>'
+ *   node scripts/send-test-email.js someone@example.com
  */
 
 var transport = require('../server/mail/transport');
