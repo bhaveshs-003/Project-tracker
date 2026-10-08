@@ -23,6 +23,15 @@ var supabase = require('../server/supabase');
 
 var RESET = process.argv.indexOf('--reset') > -1;
 
+/**
+ * Accounts only, by default.
+ *
+ * A production instance wants two logins and an empty slate — sample projects
+ * are easy to add and tedious to explain away later. --with-samples restores
+ * the directory people and the three demo projects for a scratch environment.
+ */
+var WITH_SAMPLES = process.argv.indexOf('--with-samples') > -1;
+
 function env(name, fallback) {
   var value = process.env[name];
   if (value) return value;
@@ -153,6 +162,12 @@ async function run() {
   var partnerAuth = await ensureAuthUser(PARTNER, 'partner');
   var partner = await upsertPerson(partnerAuth.id, PARTNER, 'partner', 'partner');
   console.log('  partner ' + PARTNER.email + (partnerAuth.created ? '  (created)' : '  (updated)'));
+
+  if (!WITH_SAMPLES) {
+    console.log('\n  Accounts only. Pass --with-samples for the demo directory and projects.');
+    console.log('\n  Done. Sign in as ' + ADMIN.email + '\n');
+    return;
+  }
 
   var resourceIds = [admin.id];
   for (var i = 0; i < RESOURCES.length; i++) {

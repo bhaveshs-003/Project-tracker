@@ -10,8 +10,10 @@
  * whose checksum has changed since it ran is reported rather than re-applied —
  * editing an applied migration is how two environments silently diverge.
  *
- * 0002_cron.sql needs pg_cron and pg_net, which only exist on Supabase. It is
- * skipped automatically where they are unavailable.
+ * 0002_cron.sql is skipped unless --with-cron is passed. It schedules a job
+ * that calls the deployed app every minute, so applying it before that app
+ * exists just produces a warning every sixty seconds. The Vercel step passes
+ * the flag.
  */
 
 require('../server/env');
@@ -34,6 +36,7 @@ var sql = require('../server/sql');
 var DIR = path.join(__dirname, '..', 'supabase', 'migrations');
 var STATUS = process.argv.indexOf('--status') > -1;
 var LOCAL = process.argv.indexOf('--local') > -1;
+var WITH_CRON = process.argv.indexOf('--with-cron') > -1;
 
 function checksum(text) {
   return crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
@@ -82,16 +85,17 @@ async function run() {
     console.log('  ' + '-'.repeat(52));
     list.forEach(function (m) {
       var was = applied[m.name];
-      var state = !was ? 'pending'
-        : was.checksum === m.checksum ? 'applied ' + was.applied_at.toISOString().slice(0, 10)
-          : 'APPLIED BUT EDITED SINCE';
+      var state = was
+        ? (was.checksum === m.checksum
+            ? 'applied ' + was.applied_at.toISOString().slice(0, 10)
+            : 'APPLIED BUT EDITED SINCE')
+        : (/cron/.test(m.name) ? 'deferred (needs --with-cron)' : 'pending');
       console.log('  ' + m.name.padEnd(26) + state);
     });
     console.log('');
     return;
   }
 
-  var cronReady = await hasExtension('pg_cron');
   var ran = 0;
 
   for (var i = 0; i < list.length; i++) {
@@ -107,8 +111,13 @@ async function run() {
       continue;
     }
 
-    if (/cron/.test(migration.name) && !cronReady) {
-      console.log('  -  ' + migration.name + ' skipped (pg_cron not available here)');
+    if (/cron/.test(migration.name) && !WITH_CRON) {
+      console.log('  -  ' + migration.name +
+        ' skipped (pass --with-cron once the app is deployed)');
+      continue;
+    }
+    if (/cron/.test(migration.name) && !(await hasExtension('pg_cron'))) {
+      console.log('  -  ' + migration.name + ' skipped (pg_cron is not available here)');
       continue;
     }
 

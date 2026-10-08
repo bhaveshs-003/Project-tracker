@@ -99,6 +99,47 @@ function resetDatabase() {
 // ---------------------------------------------------------------
 var authUsers = new Map();      // id -> { id, email, password, app_metadata }
 
+/**
+ * The fake also writes through to the local auth.users stand-in.
+ *
+ * people.user_id has a real foreign key to auth.users. On Supabase that table
+ * is maintained by the Auth service; here it is the shim, so the double has to
+ * keep it in step — otherwise anything that creates an account (scripts/seed.js,
+ * POST /api/people) fails on a constraint that would be perfectly happy in
+ * production, and the double would be hiding the real behaviour rather than
+ * reproducing it.
+ *
+ * Required lazily: sql.js reads DATABASE_URL when it loads, and that is not set
+ * until a few lines above this one.
+ */
+function shim() {
+  return require(path.join(ROOT, 'server', 'sql.js'));
+}
+
+/**
+ * auth.users is the store, not an in-memory Map.
+ *
+ * Supabase's user store outlives a process; a Map does not. With a Map, a
+ * second run of scripts/seed.js saw no users, tried to create them again, and
+ * collided on the email — so the script's "idempotent" claim could never be
+ * tested. Reading and writing the shim table reproduces what Supabase
+ * actually does across invocations.
+ */
+async function loadAuthUser(where, param) {
+  var row = await shim().one(
+    'SELECT * FROM auth.users WHERE ' + where + ' LIMIT 1', [param]);
+  return row ? fromRow(row) : null;
+}
+
+function fromRow(row) {
+  return {
+    id: row.id,
+    email: row.email,
+    password: row.encrypted_password,     // the double stores it in clear; Supabase does not
+    app_metadata: row.raw_app_meta_data || {}
+  };
+}
+
 async function mintAccessToken(user, expiresInSeconds) {
   return new jose.SignJWT({
     role: 'authenticated',
@@ -137,15 +178,14 @@ function fakeAuthClient() {
   return {
     auth: {
       signInWithPassword: async function (c) {
-        var user = [...authUsers.values()].find(function (u) {
-          return u.email === String(c.email).toLowerCase();
-        });
+        var user = await loadAuthUser('email = $1', String(c.email).toLowerCase());
         if (!user || user.password !== c.password) return fail('Invalid login credentials', 400);
+        authUsers.set(user.id, user);
         return ok({ user: user, session: await sessionFor(user) });
       },
       refreshSession: async function (c) {
         var id = refreshTokens.get(c.refresh_token);
-        var user = id && authUsers.get(id);
+        var user = id ? await loadAuthUser('id = $1', id) : null;
         if (!user) return fail('Invalid refresh token', 401);
         refreshTokens.delete(c.refresh_token);
         return ok({ user: user, session: await sessionFor(user) });
@@ -161,7 +201,7 @@ function fakeAuthClient() {
         var hash = c.token_hash || c.token;
         var email = recoveryHashes.get(hash);
         if (!email) return fail('Token has expired or is invalid', 401);
-        var user = [...authUsers.values()].find(function (u) { return u.email === email; });
+        var user = await loadAuthUser('email = $1', email);
         if (!user) return fail('User not found', 404);
         recoveryHashes.delete(hash);        // single use, as Supabase does
         return ok({ user: user, session: await sessionFor(user) });
@@ -169,8 +209,9 @@ function fakeAuthClient() {
       admin: {
         createUser: async function (attrs) {
           var email = String(attrs.email).toLowerCase();
-          if ([...authUsers.values()].some(function (u) { return u.email === email; })) {
-            return { data: { user: null }, error: { message: 'A user with this email already exists', status: 422 } };
+          if (await loadAuthUser('email = $1', email)) {
+            return { data: { user: null },
+              error: { message: 'A user with this email already exists', status: 422 } };
           }
           var user = {
             id: crypto.randomUUID(),
@@ -178,23 +219,41 @@ function fakeAuthClient() {
             password: attrs.password,
             app_metadata: attrs.app_metadata || {}
           };
+          await shim().run(
+            `INSERT INTO auth.users (id, email, encrypted_password, raw_app_meta_data)
+             VALUES ($1, $2, $3, $4)`,
+            [user.id, user.email, user.password, JSON.stringify(user.app_metadata)]);
           authUsers.set(user.id, user);
           return ok({ user: user });
         },
         updateUserById: async function (id, attrs) {
-          var user = authUsers.get(id);
+          var user = await loadAuthUser('id = $1', id);
           if (!user) return { data: { user: null }, error: { message: 'User not found', status: 404 } };
+
           if (attrs.password) user.password = attrs.password;
           if (attrs.email) user.email = String(attrs.email).toLowerCase();
           if (attrs.app_metadata) user.app_metadata = attrs.app_metadata;
+
+          await shim().run(
+            `UPDATE auth.users SET email = $2, encrypted_password = $3, raw_app_meta_data = $4
+              WHERE id = $1`,
+            [id, user.email, user.password, JSON.stringify(user.app_metadata)]);
+          authUsers.set(user.id, user);
           return ok({ user: user });
         },
         deleteUser: async function (id) {
-          return authUsers.delete(id)
-            ? ok({ user: null })
-            : { data: { user: null }, error: { message: 'User not found', status: 404 } };
+          if (!(await loadAuthUser('id = $1', id))) {
+            return { data: { user: null }, error: { message: 'User not found', status: 404 } };
+          }
+          authUsers.delete(id);
+          await shim().run('DELETE FROM auth.users WHERE id = $1', [id]);
+          return ok({ user: null });
         },
-        listUsers: async function () { return ok({ users: [...authUsers.values()] }); },
+        listUsers: async function () {
+          var rows = await shim().many('SELECT * FROM auth.users ORDER BY created_at');
+          rows.forEach(function (r) { authUsers.set(r.id, fromRow(r)); });
+          return ok({ users: rows.map(fromRow) });
+        },
         signOut: async function () { return { data: null, error: null }; }
       }
     }
@@ -283,9 +342,7 @@ async function createAccount(sql, supabase, attrs) {
   });
   if (created.error) throw new Error(created.error.message);
 
-  await sql.run('INSERT INTO auth.users (id, email) VALUES ($1, $2)',
-    [created.data.user.id, created.data.user.email]);
-
+  // The fake's createUser already wrote the auth.users row
   return sql.one(
     `INSERT INTO people (user_id, name, job_title, email, kind, role)
      VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
