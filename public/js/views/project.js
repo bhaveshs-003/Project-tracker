@@ -908,17 +908,163 @@ function draw() {
   wire();
 }
 
+// Looked up against live state rather than captured, so the one delegated
+// handler below stays correct across every redraw.
+const msById = id => state.project.milestones.find(m => m.id === Number(id));
+
+const stById = (id) => {
+  for (const m of state.project.milestones) {
+    const s = m.subtasks.find(s2 => s2.id === Number(id));
+    if (s) return { milestone: m, subtask: s };
+  }
+  return null;
+};
+
+/**
+ * Everything on this page that is clickable, in one delegated handler.
+ *
+ * Defined at module level and attached exactly once per mount element — see
+ * bindDelegate(). It reads state.project when it runs rather than closing over
+ * it, which is what makes attaching once safe.
+ */
+async function onMountClick(e) {
+  const p = state.project;
+  if (!p) return;
+  const t = sel => e.target.closest(sel);
+
+  const assign = t('[data-assign]');
+  if (assign) {
+    // The button lives inside <summary>, where a click would otherwise toggle
+    // the accordion shut underneath the modal we are about to open.
+    e.preventDefault();
+    return openAssign(assign.dataset.assign);
+  }
+
+  const unassign = t('[data-unassign]');
+  if (unassign) {
+    const kind = unassign.dataset.unassign;
+    const ids = (kind === 'pocs' ? p.pocs : p.resources).filter(id => id !== unassign.dataset.person);
+    return attempt(async () => {
+      mergeProject(await api.put(`/api/projects/${p.id}/${kind}`, { personIds: ids }));
+      draw();
+    }).catch(() => {});
+  }
+
+  const addSt = t('[data-add-st]');
+  if (addSt) return openItemForm({
+    title: 'Add Sub-task', isMilestone: false,
+    onSave: payload => api.post(`/api/milestones/${addSt.dataset.addSt}/subtasks`, payload)
+  });
+
+  const editMs = t('[data-edit-ms]');
+  if (editMs) {
+    const m = msById(editMs.dataset.editMs);
+    return openItemForm({
+      title: 'Edit Milestone', item: m, isMilestone: true,
+      onSave: payload => api.patch(`/api/milestones/${m.id}`, payload)
+    });
+  }
+
+  const editSt = t('[data-edit-st]');
+  if (editSt) {
+    const found = stById(editSt.dataset.editSt);
+    return openItemForm({
+      title: 'Edit Sub-task', item: found.subtask, isMilestone: false,
+      onSave: payload => api.patch(`/api/milestones/subtasks/${found.subtask.id}`, payload)
+    });
+  }
+
+  const delMs = t('[data-delete-ms]');
+  if (delMs) {
+    const m = msById(delMs.dataset.deleteMs);
+    return confirmDialog({
+      title: 'Delete milestone?',
+      message: `"${m.title}" will be deleted.`,
+      warning: `This cannot be undone.${m.subtasks.length ? ` Its ${plural(m.subtasks.length, 'sub-task')} go with it.` : ''}`,
+      confirmLabel: 'Delete milestone',
+      onConfirm: async () => { await api.del(`/api/milestones/${m.id}`); closeModal(); await refresh(); }
+    });
+  }
+
+  const delSt = t('[data-delete-st]');
+  if (delSt) {
+    const found = stById(delSt.dataset.deleteSt);
+    return confirmDialog({
+      title: 'Delete sub-task?',
+      message: `"${found.subtask.title}" will be deleted.`,
+      warning: 'This cannot be undone.',
+      confirmLabel: 'Delete sub-task',
+      onConfirm: async () => {
+        await api.del(`/api/milestones/subtasks/${found.subtask.id}`);
+        closeModal(); await refresh();
+      }
+    });
+  }
+
+  const completeMs = t('[data-complete-ms]');
+  if (completeMs) {
+    const m = msById(completeMs.dataset.completeMs);
+    return openCompleteForm({
+      title: 'Mark Milestone as Completed', subject: m.title,
+      url: `/api/milestones/${m.id}/complete`
+    });
+  }
+
+  const completeSt = t('[data-complete-st]');
+  if (completeSt) {
+    const found = stById(completeSt.dataset.completeSt);
+    return openCompleteForm({
+      title: 'Mark Sub-task as Completed', subject: found.subtask.title,
+      url: `/api/milestones/subtasks/${found.subtask.id}/complete`
+    });
+  }
+
+  const submit = t('[data-submit]');
+  if (submit) {
+    const m = msById(submit.dataset.submit);
+    const names = p.pocs.map(id => personById(id)?.name || id).join(', ');
+    return confirmDialog({
+      title: 'Submit for approval?',
+      message: `Submit "${m.title}" to ${names} for approval?`,
+      confirmLabel: 'Submit',
+      onConfirm: async () => {
+        mergeMilestone(await api.post(`/api/milestones/${m.id}/submit`));
+        closeModal(); await refresh();
+      }
+    });
+  }
+
+  const approve = t('[data-approve]');
+  if (approve) return openApprovalForm(msById(approve.dataset.approve));
+
+  const decide = t('[data-delay-decide]');
+  if (decide) { e.preventDefault(); return submitComposer(decide, decide.dataset.delayDecide); }
+
+  const comment = t('[data-delay-comment]');
+  if (comment) { e.preventDefault(); return submitComposer(comment, null); }
+}
+
+/**
+ * Attach the delegated handler once, not once per redraw.
+ *
+ * draw() replaces the mount element's innerHTML, which discards its children
+ * and any listeners on them — but the mount element itself survives. A
+ * listener added to it therefore accumulated one copy per draw, and a single
+ * click ran all of them: navigate three sub-tabs and one "Deny" posted twelve
+ * comments.
+ */
+let delegateAttachedTo = null;
+
+function bindDelegate(el) {
+  if (delegateAttachedTo === el) return;
+  if (delegateAttachedTo) delegateAttachedTo.removeEventListener('click', onMountClick);
+  el.addEventListener('click', onMountClick);
+  delegateAttachedTo = el;
+}
+
 function wire() {
   const p = state.project;
   const el = mountEl;
-  const msById = id => p.milestones.find(m => m.id === Number(id));
-  const stById = id => {
-    for (const m of p.milestones) {
-      const s = m.subtasks.find(s2 => s2.id === Number(id));
-      if (s) return { milestone: m, subtask: s };
-    }
-    return null;
-  };
 
   el.querySelector('#d-edit')?.addEventListener('click', () =>
     openProjectForm(p, async saved => { mergeProject(saved); await refresh(); }));
@@ -949,120 +1095,7 @@ function wire() {
     });
   });
 
-  el.addEventListener('click', async (e) => {
-    const t = sel => e.target.closest(sel);
-
-    const assign = t('[data-assign]');
-    if (assign) {
-      // The button lives inside <summary>, where a click would otherwise toggle
-      // the accordion shut underneath the modal we are about to open.
-      e.preventDefault();
-      return openAssign(assign.dataset.assign);
-    }
-
-    const unassign = t('[data-unassign]');
-    if (unassign) {
-      const kind = unassign.dataset.unassign;
-      const ids = (kind === 'pocs' ? p.pocs : p.resources).filter(id => id !== unassign.dataset.person);
-      return attempt(async () => {
-        mergeProject(await api.put(`/api/projects/${p.id}/${kind}`, { personIds: ids }));
-        draw();
-      }).catch(() => {});
-    }
-
-    const addSt = t('[data-add-st]');
-    if (addSt) return openItemForm({
-      title: 'Add Sub-task', isMilestone: false,
-      onSave: payload => api.post(`/api/milestones/${addSt.dataset.addSt}/subtasks`, payload)
-    });
-
-    const editMs = t('[data-edit-ms]');
-    if (editMs) {
-      const m = msById(editMs.dataset.editMs);
-      return openItemForm({
-        title: 'Edit Milestone', item: m, isMilestone: true,
-        onSave: payload => api.patch(`/api/milestones/${m.id}`, payload)
-      });
-    }
-
-    const editSt = t('[data-edit-st]');
-    if (editSt) {
-      const found = stById(editSt.dataset.editSt);
-      return openItemForm({
-        title: 'Edit Sub-task', item: found.subtask, isMilestone: false,
-        onSave: payload => api.patch(`/api/milestones/subtasks/${found.subtask.id}`, payload)
-      });
-    }
-
-    const delMs = t('[data-delete-ms]');
-    if (delMs) {
-      const m = msById(delMs.dataset.deleteMs);
-      return confirmDialog({
-        title: 'Delete milestone?',
-        message: `"${m.title}" will be deleted.`,
-        warning: `This cannot be undone.${m.subtasks.length ? ` Its ${plural(m.subtasks.length, 'sub-task')} go with it.` : ''}`,
-        confirmLabel: 'Delete milestone',
-        onConfirm: async () => { await api.del(`/api/milestones/${m.id}`); closeModal(); await refresh(); }
-      });
-    }
-
-    const delSt = t('[data-delete-st]');
-    if (delSt) {
-      const found = stById(delSt.dataset.deleteSt);
-      return confirmDialog({
-        title: 'Delete sub-task?',
-        message: `"${found.subtask.title}" will be deleted.`,
-        warning: 'This cannot be undone.',
-        confirmLabel: 'Delete sub-task',
-        onConfirm: async () => {
-          await api.del(`/api/milestones/subtasks/${found.subtask.id}`);
-          closeModal(); await refresh();
-        }
-      });
-    }
-
-    const completeMs = t('[data-complete-ms]');
-    if (completeMs) {
-      const m = msById(completeMs.dataset.completeMs);
-      return openCompleteForm({
-        title: 'Mark Milestone as Completed', subject: m.title,
-        url: `/api/milestones/${m.id}/complete`
-      });
-    }
-
-    const completeSt = t('[data-complete-st]');
-    if (completeSt) {
-      const found = stById(completeSt.dataset.completeSt);
-      return openCompleteForm({
-        title: 'Mark Sub-task as Completed', subject: found.subtask.title,
-        url: `/api/milestones/subtasks/${found.subtask.id}/complete`
-      });
-    }
-
-    const submit = t('[data-submit]');
-    if (submit) {
-      const m = msById(submit.dataset.submit);
-      const names = p.pocs.map(id => personById(id)?.name || id).join(', ');
-      return confirmDialog({
-        title: 'Submit for approval?',
-        message: `Submit "${m.title}" to ${names} for approval?`,
-        confirmLabel: 'Submit',
-        onConfirm: async () => {
-          mergeMilestone(await api.post(`/api/milestones/${m.id}/submit`));
-          closeModal(); await refresh();
-        }
-      });
-    }
-
-    const approve = t('[data-approve]');
-    if (approve) return openApprovalForm(msById(approve.dataset.approve));
-
-    const decide = t('[data-delay-decide]');
-    if (decide) { e.preventDefault(); return submitComposer(decide, decide.dataset.delayDecide); }
-
-    const comment = t('[data-delay-comment]');
-    if (comment) { e.preventDefault(); return submitComposer(comment, null); }
-  });
+  bindDelegate(el);
 
   // Show the chosen filename, and refuse an oversized one before uploading it
   el.querySelectorAll('.composer input[type="file"]').forEach(input => {
@@ -1124,6 +1157,12 @@ async function submitComposer(button, decision) {
   const body = form.querySelector('[data-field="body"]').value.trim();
   const file = form.querySelector('[data-field="attachment"]').files[0];
 
+  // One post per composer at a time. The listener leak that made a single
+  // click post twelve comments is fixed at the source, but a posted comment is
+  // not something to leave guarded by one mechanism: a double-click, a stray
+  // re-binding, or a slow network must not be able to write it twice.
+  if (form.dataset.submitting === 'yes') return;
+
   composerError(form, '');
   if (decision === 'denied' && !body) {
     return composerError(form, 'Say why you are denying this delay.');
@@ -1134,6 +1173,8 @@ async function submitComposer(button, decision) {
   if (file && file.size > MAX_UPLOAD_BYTES) {
     return composerError(form, 'That file is larger than 10MB.');
   }
+
+  form.dataset.submitting = 'yes';
 
   const buttons = [...form.querySelectorAll('button')];
   const label = form.querySelector('[data-file-label]');
@@ -1153,6 +1194,7 @@ async function submitComposer(button, decision) {
     await refresh();
     if (decision) toast(decision === 'accepted' ? 'Delay accepted.' : 'Delay denied.', 'info');
   } catch (err) {
+    form.dataset.submitting = '';          // the redraw never happened; allow a retry
     buttons.forEach(b => { b.disabled = false; });
     if (label) label.textContent = original;
     composerError(form, err.message);

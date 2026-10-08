@@ -382,6 +382,50 @@ var setFile = function (sel, name, mime, size) {
           return r.status;
         })()`, true)) === 200);
 
+    // ---------------------------------------------------------------
+    section('one click, one comment');
+
+    // draw() replaces #view's innerHTML but not #view itself, so a delegated
+    // listener attached to #view survives every redraw. Navigating between
+    // sub-tabs therefore used to stack one handler per draw, and a single
+    // click posted as many comments as there had been redraws.
+    // The recovery section above changed this account's password
+    await cdp.login(page, BASE, 'poc@example.test', 'BrandNewPassword1');
+
+    // The sub-task is the delayed item in this fixture, so it is the one with
+    // a thread and a composer.
+    var dupThread = 'subtask:' + subtask.id;
+    var before = await sql.value(
+      'SELECT count(*)::int FROM delay_comments WHERE item_type = $1 AND item_id = $2',
+      ['subtask', subtask.id]);
+
+    // Move around inside the SPA — no full page load, so nothing is reset
+    for (var r = 0; r < 4; r++) {
+      await cdp.nav(page, '/projects/PRJ-900');
+      await cdp.nav(page, '/projects/PRJ-900/milestones');
+      await cdp.nav(page, '/projects/PRJ-900/comments');
+    }
+
+    var listeners = await cdp.evaluate(page, `
+      (() => {
+        const el = document.getElementById('view');
+        return el.__clickHandlers === undefined ? 'untracked' : el.__clickHandlers;
+      })()`);
+
+    await cdp.evaluate(page, typeInto('[data-thread="' + dupThread + '"] [data-field="body"]',
+      'Exactly one of these should exist.'));
+    await cdp.evaluate(page,
+      'document.querySelector(\'[data-thread="' + dupThread + '"] [data-delay-decide="denied"]\').click(); true');
+    await cdp.sleep(2500);
+
+    var after = await sql.value(
+      'SELECT count(*)::int FROM delay_comments WHERE item_type = $1 AND item_id = $2',
+      ['subtask', subtask.id]);
+
+    check('after 12 redraws, one click writes exactly one comment',
+      after - before === 1, (after - before) + ' comments written (listeners: ' + listeners + ')');
+    await cdp.screenshot(page, '10-no-duplicates');
+
     check('no uncaught page errors anywhere', pageErrors.length === 0,
       pageErrors.slice(0, 3).join(' | '));
 
