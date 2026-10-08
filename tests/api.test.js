@@ -285,6 +285,54 @@ async function call(who, method, path, body, options) {
     { decision: 'denied', body: 'Changed my mind.' });
   check('delays cannot be re-decided after approval', afterApproval.status === 409);
 
+  // ---------------------------------------------------------------
+  section('accepting closes the conversation');
+
+  // A fresh delayed sub-task, submitted and awaiting a decision
+  var m3 = (await call('admin', 'POST', '/api/milestones',
+    { projectId: projectId, title: 'Closure' })).data;
+  var s3 = (await call('admin', 'POST', '/api/milestones/' + m3.id + '/subtasks',
+    { title: 'Closable task' })).data.subtasks[0];
+  await call('admin', 'POST', '/api/milestones/subtasks/' + s3.id + '/complete',
+    { outcome: 'Delayed', delaySide: 'Company Side', delayNotes: 'Slipped a week.' });
+  await call('admin', 'POST', '/api/milestones/' + m3.id + '/complete', { outcome: 'On-Time' });
+  await call('admin', 'POST', '/api/milestones/' + m3.id + '/submit');
+
+  // While pending, the admin has nothing to say yet
+  check('admin cannot comment before a decision',
+    (await call('admin', 'POST', '/api/delays/subtask/' + s3.id + '/comments',
+      { body: 'Getting ahead of myself.' })).status === 409);
+
+  // Deny: the thread opens for both sides
+  var den = await call('poc', 'POST', '/api/delays/subtask/' + s3.id + '/decision',
+    { decision: 'denied', body: 'A week is too much.' });
+  check('denying opens the thread', den.status === 200, JSON.stringify(den.data).slice(0, 90));
+  check('  admin may now reply',
+    (await call('admin', 'POST', '/api/delays/subtask/' + s3.id + '/comments',
+      { body: 'Here is why.' })).status === 200);
+  check('  and the partner may keep talking',
+    (await call('poc', 'POST', '/api/delays/subtask/' + s3.id + '/comments',
+      { body: 'Still not convinced.' })).status === 200);
+
+  // Accept: the thread closes for everyone
+  var acc = await call('poc', 'POST', '/api/delays/subtask/' + s3.id + '/decision',
+    { decision: 'accepted', body: 'Fine, accepted.' });
+  check('accepting settles it',
+    acc.data.subtasks.find(function (x) { return x.id === s3.id; }).delayStatus === 'accepted');
+
+  check('  the admin can no longer reply',
+    (await call('admin', 'POST', '/api/delays/subtask/' + s3.id + '/comments',
+      { body: 'One more thing.' })).status === 409);
+  check('  nor can the partner',
+    (await call('poc', 'POST', '/api/delays/subtask/' + s3.id + '/comments',
+      { body: 'Actually...' })).status === 409);
+
+  var reopen = await call('poc', 'POST', '/api/delays/subtask/' + s3.id + '/decision',
+    { decision: 'denied', body: 'Changed my mind after all.' });
+  check('  and an acceptance cannot be reversed', reopen.status === 409, reopen.data.error);
+  check('  the message says why', /settled and cannot be changed/.test(reopen.data.error || ''),
+    reopen.data.error);
+
   section('feedback visibility');
   var adminSees = await call('admin', 'GET', '/api/projects/' + projectId);
   var pocSees = await call('poc', 'GET', '/api/projects/' + projectId);

@@ -87,6 +87,7 @@ async function createUploadTicket(person, originalName, declaredBytes) {
   // A UUID path, namespaced by the uploader so Storage policies can scope by
   // owner later without a schema change.
   var objectPath = person.id + '/' + crypto.randomUUID() + extensionOf(filename);
+  filename = downloadName(filename);        // store it already clean
 
   var signed = await supabase.admin.storage.from(BUCKET)
     .createSignedUploadUrl(objectPath, { upsert: false });
@@ -156,13 +157,35 @@ async function claimUpload(person, objectPath, runner) {
 }
 
 /**
+ * The name the browser should save the file as.
+ *
+ * Supabase reflects the `download` parameter into Content-Disposition, and
+ * anything outside plain ASCII comes back double-encoded: a macOS screenshot
+ * carries U+202F (narrow no-break space) and arrives as the literal text
+ * "4.09.37%E2%80%AFPM.png". Folding exotic whitespace to a normal space and
+ * dropping characters that have no business in a filename keeps the name
+ * readable and the header well-formed.
+ */
+function downloadName(filename) {
+  return String(filename || 'attachment')
+    // every Unicode space separator, plus the no-break ones, become a space
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .replace(/[\u0000-\u001F\u007F]/g, '')      // control characters
+    .replace(/["\\]/g, '')                       // would break the quoted header
+    .replace(/[/\\]/g, '-')                      // path separators
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180) || 'attachment';
+}
+
+/**
  * A short-lived download link. `download` makes Supabase send
  * Content-Disposition: attachment, so a stored file can never be rendered in
  * this app's origin — the protection the streaming version provided.
  */
 async function signedDownloadUrl(objectPath, filename) {
   var signed = await supabase.admin.storage.from(BUCKET)
-    .createSignedUrl(objectPath, DOWNLOAD_URL_TTL, { download: filename || true });
+    .createSignedUrl(objectPath, DOWNLOAD_URL_TTL, { download: downloadName(filename) });
 
   if (signed.error) {
     var err = new Error('No such attachment');
@@ -212,6 +235,7 @@ module.exports = {
   MAX_BYTES: MAX_BYTES,
   EXTENSIONS: EXTENSIONS,
   ACCEPT_ATTRIBUTE: ACCEPT_ATTRIBUTE,
+  downloadName: downloadName,
   mimeFor: mimeFor,
   createUploadTicket: createUploadTicket,
   claimUpload: claimUpload,

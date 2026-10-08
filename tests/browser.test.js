@@ -33,6 +33,12 @@ function section(t) { console.log('\n--- ' + t + ' ---'); }
 var PORT = 3242;
 var BASE = 'http://127.0.0.1:' + PORT;
 
+// Supabase Storage is a different origin, so the stand-in is a separate
+// server rather than a route on the app. Mounting it on the app would also
+// put it behind the SPA catch-all, which answers everything with index.html.
+var STORAGE_PORT = 3244;
+var STORAGE_BASE = 'http://127.0.0.1:' + STORAGE_PORT;
+
 var txt = function (sel) {
   return '(document.querySelector(' + JSON.stringify(sel) + ')||{}).innerText||""';
 };
@@ -72,6 +78,9 @@ var setFile = function (sel, name, mime, size) {
     process.exit(0);
   }
 
+  // Signed download URLs must point somewhere a browser can actually reach
+  process.env.TEST_STORAGE_BASE = STORAGE_BASE;
+
   harness.resetDatabase();
   var supabase = harness.install();
 
@@ -97,6 +106,23 @@ var setFile = function (sel, name, mime, size) {
   var server = await new Promise(function (r) {
     var s = app.listen(PORT, function () { r(s); });
   });
+
+  // Supabase Storage, as far as the browser is concerned: another origin
+  // answering a signed URL with Content-Disposition: attachment.
+  var storage = require('http').createServer(function (req, res) {
+    var parsed = new URL(req.url, STORAGE_BASE);
+    var objectPath = decodeURIComponent(
+      parsed.pathname.replace('/storage/v1/object/sign/', ''));
+    var stored = harness.objects.get(objectPath);
+    if (!stored) { res.statusCode = 404; return res.end('not found'); }
+
+    var name = String(parsed.searchParams.get('download') || 'file');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition',
+      'attachment; filename="' + name.replace(/"/g, '') + '"');
+    res.end(Buffer.alloc(stored.size));
+  });
+  await new Promise(function (r) { storage.listen(STORAGE_PORT, r); });
 
   var admin = await harness.createAccount(sql, supabase, {
     email: 'admin@example.test', password: 'AdminPassword1', name: 'Ada Admin', role: 'admin'
@@ -412,10 +438,13 @@ var setFile = function (sel, name, mime, size) {
         return el.__clickHandlers === undefined ? 'untracked' : el.__clickHandlers;
       })()`);
 
+    // This delay is already denied, so the partner's options are "Accept and
+    // close" or "Reply". Reply is the one that leaves the thread open for the
+    // count to be meaningful.
     await cdp.evaluate(page, typeInto('[data-thread="' + dupThread + '"] [data-field="body"]',
       'Exactly one of these should exist.'));
     await cdp.evaluate(page,
-      'document.querySelector(\'[data-thread="' + dupThread + '"] [data-delay-decide="denied"]\').click(); true');
+      'document.querySelector(\'[data-thread="' + dupThread + '"] [data-delay-comment]\').click(); true');
     await cdp.sleep(2500);
 
     var after = await sql.value(
@@ -426,6 +455,92 @@ var setFile = function (sel, name, mime, size) {
       after - before === 1, (after - before) + ' comments written (listeners: ' + listeners + ')');
     await cdp.screenshot(page, '10-no-duplicates');
 
+    // ---------------------------------------------------------------
+    section('clicking an attachment downloads it');
+
+    var downloadDir = require('fs').mkdtempSync(
+      require('path').join(require('os').tmpdir(), 'ft-downloads-'));
+    await page.send('Browser.setDownloadBehavior',
+      { behavior: 'allow', downloadPath: downloadDir, eventsEnabled: true });
+
+    // What differs between the two roles is authorisation, and that is a
+    // server answer — so check it per role over HTTP. The browser mechanics
+    // (click, 302, Content-Disposition, save) do not vary by who is signed in,
+    // and Chrome refuses a second automatic download per origin in one
+    // session, so driving the click twice would measure Chrome, not the app.
+    for (var who of [['admin@example.test', 'AdminPassword1', 'admin'],
+                     ['poc@example.test', 'BrandNewPassword1', 'Partner POC']]) {
+      await cdp.login(page, BASE, who[0], who[1]);
+      await cdp.nav(page, '/projects/PRJ-900/comments');
+
+      check(who[2] + ' sees the attachment chip',
+        await cdp.evaluate(page, has('.attachment')));
+
+      var answer = JSON.parse(await cdp.evaluate(page, `
+        (async () => {
+          const a = document.querySelector('.attachment');
+          const res = await fetch(a.getAttribute('href') + '?json=1');
+          return JSON.stringify({ status: res.status, body: await res.json() });
+        })()`, true));
+
+      check('  ' + who[2] + ' is issued a download URL', answer.status === 200,
+        JSON.stringify(answer).slice(0, 110));
+      check('  forcing a save under the real name',
+        /download=evidence\.pdf/.test((answer.body || {}).url || ''), (answer.body || {}).url);
+    }
+
+    // And once, for real: a click must put the file on disk, not route the
+    // href as a page. The router used to swallow it — see router.js.
+    var before = require('fs').readdirSync(downloadDir);
+    await cdp.clickAt(page, '.attachment');
+    await cdp.sleep(2500);
+    var saved = require('fs').readdirSync(downloadDir)
+      .filter(function (f) { return before.indexOf(f) === -1 && !/\.crdownload$/.test(f); });
+
+    check('a click saves the file', saved.length === 1, JSON.stringify(saved));
+    if (saved.length) {
+      check('  under its real name, no percent-escapes',
+        saved[0] === 'evidence.pdf', saved[0]);
+      check('  with the right bytes',
+        require('fs').statSync(require('path').join(downloadDir, saved[0])).size === 2048);
+    }
+    check('  and the page stayed where it was',
+      (await cdp.evaluate(page, 'location.pathname')) === '/projects/PRJ-900/comments',
+      await cdp.evaluate(page, 'location.pathname'));
+
+    // ---------------------------------------------------------------
+    section('accepting closes the thread on screen');
+
+    await cdp.login(page, BASE, 'poc@example.test', 'BrandNewPassword1');
+    await cdp.nav(page, '/projects/PRJ-900/comments');
+
+    var closeThread = '[data-thread="subtask:' + subtask.id + '"]';
+    check('a denied delay offers Accept-and-close and Reply',
+      await cdp.evaluate(page, has(closeThread + ' [data-delay-decide="accepted"]')) &&
+      await cdp.evaluate(page, has(closeThread + ' [data-delay-comment]')));
+    check('  but no way to deny it again',
+      !await cdp.evaluate(page, has(closeThread + ' [data-delay-decide="denied"]')));
+
+    await cdp.evaluate(page, typeInto(closeThread + ' [data-field="body"]', 'Accepted, thanks.'));
+    await cdp.evaluate(page,
+      'document.querySelector(\'' + closeThread + ' [data-delay-decide="accepted"]\').click(); true');
+    await cdp.sleep(2500);
+
+    check('the partner loses the composer once accepted',
+      !await cdp.evaluate(page, has(closeThread + ' .composer')),
+      await cdp.evaluate(page, txt(closeThread + ' .composer-locked')));
+    check('  and is told it is settled',
+      /settled and the conversation is closed/.test(
+        await cdp.evaluate(page, txt(closeThread + ' .composer-locked'))),
+      await cdp.evaluate(page, txt(closeThread + ' .composer-locked')));
+    await cdp.screenshot(page, '11-thread-closed');
+
+    await cdp.login(page, BASE, 'admin@example.test', 'AdminPassword1');
+    await cdp.nav(page, '/projects/PRJ-900/comments');
+    check('the admin loses it too',
+      !await cdp.evaluate(page, has(closeThread + ' .composer')),
+      await cdp.evaluate(page, txt(closeThread + ' .composer-locked')));
+
     check('no uncaught page errors anywhere', pageErrors.length === 0,
       pageErrors.slice(0, 3).join(' | '));
 
@@ -433,6 +548,7 @@ var setFile = function (sel, name, mime, size) {
     page.close();
     cdp.kill(browser);
     server.close();
+    if (typeof storage !== 'undefined') storage.close();
   }
 
   console.log('\n================  ' + pass + ' passed, ' + fail + ' failed  ================');

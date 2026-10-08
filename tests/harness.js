@@ -280,8 +280,12 @@ function fakeStorage() {
             return { data: null, error: { message: 'Object not found', status: 404 } };
           }
           var name = opts && opts.download ? String(opts.download) : '';
+          // The browser suite points this at its own server so a click can
+          // actually fetch bytes; otherwise the host does not resolve and a
+          // download test would fail for the wrong reason.
+          var base = process.env.TEST_STORAGE_BASE || SUPABASE_URL;
           return ok({
-            signedUrl: SUPABASE_URL + '/storage/v1/object/sign/' + objectPath +
+            signedUrl: base + '/storage/v1/object/sign/' + objectPath +
               '?token=test&download=' + encodeURIComponent(name)
           });
         },

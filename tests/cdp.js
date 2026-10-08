@@ -185,6 +185,32 @@ async function login(cdp, base, email, password) {
     await evaluate(cdp, "document.getElementById('login-error').textContent"));
 }
 
+/**
+ * A real mouse click at the element's centre.
+ *
+ * element.click() is synthetic and carries no user activation, so Chrome
+ * treats the resulting download as automatic — and blocks the second one from
+ * an origin. Dispatching through the input pipeline is both a truer test and
+ * free of that limit.
+ */
+async function clickAt(cdp, selector) {
+  var box = await evaluate(cdp, `
+    (() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return null;
+      el.scrollIntoView({ block: 'center' });
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+  if (!box) throw new Error('nothing matches ' + selector);
+
+  for (var type of ['mousePressed', 'mouseReleased']) {
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: type, x: box.x, y: box.y, button: 'left', clickCount: 1
+    });
+  }
+}
+
 /** In-app navigation through the router, so there is no full reload. */
 async function nav(cdp, path_) {
   await evaluate(cdp, `
@@ -205,5 +231,6 @@ function kill(browser) {
 module.exports = {
   SHOTS: SHOTS, findChrome: findChrome, launch: launch, connect: connect,
   evaluate: evaluate, screenshot: screenshot, setViewport: setViewport,
-  goto: goto, login: login, signOut: signOut, nav: nav, sleep: sleep, kill: kill
+  goto: goto, login: login, signOut: signOut, nav: nav, clickAt: clickAt,
+  sleep: sleep, kill: kill
 };

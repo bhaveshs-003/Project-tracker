@@ -90,6 +90,17 @@ export function bind() {
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href^="/"]');
     if (!link || link.target === '_blank' || e.metaKey || e.ctrlKey || e.shiftKey) return;
+
+    // Not every path-absolute link is a page.
+    //
+    // An attachment is <a href="/api/delays/attachments/1" download>. Routing
+    // it client-side called preventDefault() and then looked for a page at
+    // that path, so the browser never made the request and clicking a file
+    // did nothing at all. A download, or anything under /api/, has to be left
+    // to the browser.
+    if (link.hasAttribute('download')) return;
+    if (link.getAttribute('href').startsWith('/api/')) return;
+
     e.preventDefault();
     navigate(link.getAttribute('href'));
   });

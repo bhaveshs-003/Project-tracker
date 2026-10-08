@@ -199,26 +199,40 @@ function composerFor(milestone, delay) {
     return locked('This milestone has not been submitted for approval yet, so there is nothing to decide.');
   }
 
+  // Accepting closes the conversation, for everyone. There is nothing left to
+  // argue about and nothing for the admin to answer, so the thread becomes a
+  // record rather than somewhere to keep typing.
+  if (delay.status === 'accepted') {
+    const who = delay.decidedBy ? personById(delay.decidedBy) : null;
+    return locked('Accepted' + (who ? ' by ' + escapeHtml(who.name) : '') +
+      (delay.decidedAt ? ' on ' + formatDate(delay.decidedAt) : '') +
+      ' — this delay is settled and the conversation is closed.');
+  }
+
   if (partner) {
     if (!isPoc) return locked('Only an assigned Partner POC can decide on this delay.');
+
+    // Pending: decide. Denied: the thread is theirs to continue, and accepting
+    // is the way to close it.
     const deciding = delay.status === 'pending';
     return composerHtml(delay, {
       placeholder: deciding
         ? 'Why do you accept or deny this delay?'
-        : 'Add to this thread…',
-      buttons: `
-        <button class="btn-primary" data-delay-decide="accepted">Accept delay</button>
-        <button class="btn-ghost danger-outline" data-delay-decide="denied">Deny delay</button>
-        ${deciding ? '' : '<button class="btn-ghost" data-delay-comment>Comment</button>'}`,
-      hint: deciding ? '' : `Currently ${DELAY_STATUS_LABEL[delay.status].toLowerCase()}. You can change it.`
+        : 'Reply, or accept the delay to close this.',
+      buttons: deciding
+        ? `<button class="btn-primary" data-delay-decide="accepted">Accept delay</button>
+           <button class="btn-ghost danger-outline" data-delay-decide="denied">Deny delay</button>`
+        : `<button class="btn-primary" data-delay-decide="accepted">Accept and close</button>
+           <button class="btn-ghost" data-delay-comment>Reply</button>`,
+      hint: deciding
+        ? 'Accepting settles this delay for good. Denying keeps it open for a reply.'
+        : 'You denied this delay. Accepting it closes the conversation.'
     });
   }
 
   // Admin — a reply box appears on a denial and nowhere else
   if (delay.status !== 'denied') {
-    return locked(delay.status === 'accepted'
-      ? 'The Partner POC accepted this delay — nothing to answer.'
-      : 'You can reply here once the Partner POC has denied this delay.');
+    return locked('You can reply here once the Partner POC has denied this delay.');
   }
   return composerHtml(delay, {
     placeholder: 'Respond to the denial — add context or evidence.',
@@ -842,8 +856,8 @@ function commentsTab(p) {
   }
 
   return `<div class="section-head"><h3>Comments</h3></div>
-    <p class="day-hint comments-intro">One thread per delay. The Partner POC accepts or denies;
-      the admin can reply once a delay has been denied.</p>
+    <p class="day-hint comments-intro">One thread per delay. Accepting settles it and closes the
+      conversation; denying keeps it open for the admin to reply.</p>
     ${groups.map(({ milestone, delays }) => `
       <div class="thread-group">
         <div class="thread-group-head">

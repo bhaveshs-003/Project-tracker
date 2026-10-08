@@ -241,23 +241,34 @@ function assertCanDecideDelay(user, milestone, item, decision, isPoc) {
   if (milestone.approval !== 'pending') {
     conflict('"' + milestone.title + '" has not been submitted for approval yet.');
   }
+  // Accepting ends the conversation. It cannot be reopened by denying it
+  // afterwards, which is the whole point of the acceptance being final.
+  if (item.row.delay_status === 'accepted') {
+    conflict('You have already accepted the delay on "' + item.title +
+      '". That is settled and cannot be changed.');
+  }
 }
 
 /**
- * The admin gets a reply box on a denial and nowhere else. An accepted delay is
- * settled, and an undecided one has not been objected to yet.
+ * Who may add to a thread.
+ *
+ *   accepted — nobody. The conversation is over.
+ *   denied   — the admin, to answer it; the partner, to keep discussing.
+ *   pending  — the partner only, and through a decision rather than a comment.
  */
 function assertCanReplyToDelay(user, milestone, item) {
   if (!item) conflict('That item is not recorded as delayed.');
-  if (user.role === 'admin') {
-    if (item.row.delay_status !== 'denied') {
-      conflict('You can only reply once the Partner POC has denied this delay.');
-    }
-    return;
+
+  if (item.row.delay_status === 'accepted') {
+    conflict('The delay on "' + item.title +
+      '" was accepted — that conversation is closed.');
   }
-  // The partner may keep talking on their own thread while it is open
   if (milestone.approval === 'approved') {
     conflict('"' + milestone.title + '" is already approved — its delays are settled.');
+  }
+
+  if (user.role === 'admin' && item.row.delay_status !== 'denied') {
+    conflict('You can only reply once the Partner POC has denied this delay.');
   }
 }
 
