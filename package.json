@@ -4,16 +4,16 @@
   "description": "Project tracking with partner approval and delay negotiation — Express, Supabase Postgres, Supabase Auth and Storage",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js",
-    "seed": "node scripts/seed.js",
+    "start": "node --experimental-websocket server/index.js",
+    "seed": "node --experimental-websocket scripts/seed.js",
     "migrate": "node scripts/migrate.js",
     "test": "node tests/run.js",
     "test:api": "node tests/api.test.js",
     "test:perf": "node tests/performance.test.js",
     "test:concurrency": "node tests/concurrency.test.js",
     "test:schema": "node tests/schema.test.js",
-    "doctor": "node scripts/doctor.js",
-    "setup:storage": "node scripts/setup-storage.js",
+    "doctor": "node --experimental-websocket scripts/doctor.js",
+    "setup:storage": "node --experimental-websocket scripts/setup-storage.js",
     "test:browser": "node --experimental-websocket tests/browser.test.js"
   },
   "dependencies": {
@@ -26,6 +26,6 @@
     "zod": "^3.25.76"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.12.0"
   }
 }

@@ -20,7 +20,11 @@
  *     concurrency, impossible to reproduce serially.
  */
 
+var fs = require('fs');
+var path = require('path');
 var pg = require('pg');
+
+var CA_FILE = path.join(__dirname, '..', 'supabase', 'prod-ca-2021.crt');
 
 // node-postgres hands back `bigint` as a string because a 64-bit integer does
 // not fit a JS number. Every id in this schema is a bigint and the client
@@ -66,8 +70,21 @@ function tlsOptions() {
   }
 
   var options = { rejectUnauthorized: true };
+
+  // Supabase's pooler presents a chain rooted at its own "Supabase Root 2021
+  // CA", which is not in any public trust store — so verification against the
+  // system store alone fails with SELF_SIGNED_CERT_IN_CHAIN. The usual advice
+  // is to set rejectUnauthorized: false, which trusts *everything*. Pinning
+  // Supabase's root instead keeps verification on and narrows it: only that
+  // CA is accepted, so a certificate from anywhere else is still refused.
+  //
+  // supabase/prod-ca-2021.crt was downloaded from Supabase and checked against
+  // the certificate the server actually presents; both are SHA-256
+  // 80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA
   if (process.env.SUPABASE_CA_CERT) {
     options.ca = process.env.SUPABASE_CA_CERT.replace(/\\n/g, '\n');
+  } else if (fs.existsSync(CA_FILE)) {
+    options.ca = fs.readFileSync(CA_FILE, 'utf8');
   }
   return options;
 }

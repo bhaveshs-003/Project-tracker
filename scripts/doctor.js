@@ -45,11 +45,29 @@ var OPTIONAL = [
   'MAIL_ALLOWLIST', 'NODE_ENV'
 ];
 
+var SEED_VARS = [
+  'SEED_ADMIN_EMAIL', 'SEED_ADMIN_PASSWORD', 'SEED_PARTNER_EMAIL', 'SEED_PARTNER_PASSWORD'
+];
+
 var TABLES = [
   'people', 'projects', 'project_resources', 'project_pocs', 'milestones', 'subtasks',
   'milestone_mentions', 'delay_comments', 'attachments', 'pending_uploads',
   'emails', 'audit', 'auth_attempts'
 ];
+
+/**
+ * What is safe to print for a given variable.
+ *
+ * Deny-listing by name alone was not enough: DIRECT_DATABASE_URL contains
+ * neither "SECRET" nor "KEY", so it printed its first 48 characters — which is
+ * precisely the part holding the database password. Anything that parses as a
+ * URL with credentials is redacted on its shape, not its name.
+ */
+function safeValue(name, value) {
+  if (/SECRET|KEY|PASS|TOKEN/i.test(name)) return '(set)';
+  if (value.indexOf('://') > -1) return redactUrl(value);
+  return value.slice(0, 48);
+}
 
 function redactUrl(raw) {
   try {
@@ -67,9 +85,43 @@ async function run() {
     missing.length ? 'missing: ' + missing.join(', ') : REQUIRED.length + ' present');
 
   OPTIONAL.forEach(function (name) {
-    if (process.env[name]) note(name, name.indexOf('SECRET') > -1 || name.indexOf('KEY') > -1
-      ? '(set)' : process.env[name].slice(0, 48));
+    if (process.env[name]) note(name, safeValue(name, process.env[name]));
   });
+
+  // Reported but not required: these are read by scripts/seed.js only, and a
+  // gap here fails at the seed step rather than here. Better to say so now.
+  var seedMissing = SEED_VARS.filter(function (name) { return !process.env[name]; });
+  if (seedMissing.length) {
+    warn('seed variables not set (needed by npm run seed): ' + seedMissing.join(', '));
+  }
+
+  // Present is not the same as usable. Checking only for emptiness let
+  // admin@example.com and a too-short password through to fail at the seed.
+  var minPassword = Number(process.env.MIN_PASSWORD_LENGTH || 10);
+  SEED_VARS.forEach(function (name) {
+    var value = process.env[name];
+    if (!value) return;
+    if (/PASSWORD/.test(name)) {
+      var ok = value.length >= minPassword;
+      note(name, value.length + ' characters' +
+        (ok ? '' : '  — shorter than the ' + minPassword + '-character minimum'));
+      if (!ok) warn(name + ' is too short; npm run seed will refuse it');
+    } else {
+      note(name, value);
+      if (/example\.(com|test|org)$/i.test(value)) {
+        warn(name + ' is still the template address (' + value + ')');
+      }
+    }
+  });
+
+  var placeholders = Object.keys(process.env).filter(function (name) {
+    return (REQUIRED.indexOf(name) > -1 || OPTIONAL.indexOf(name) > -1) &&
+      /PROJECT_REF|YOUR-PASSWORD|\[PASSWORD\]|REGION\.|example\.com|CHANGEME/i.test(
+        process.env[name]);
+  });
+  if (placeholders.length) {
+    warn('still holding template text, not a real value: ' + placeholders.join(', '));
+  }
 
   if (missing.length) {
     console.log('\n  Cannot continue without those. See .env.example.\n');
@@ -117,8 +169,12 @@ async function run() {
   record(absent.length === 0, 'all ' + TABLES.length + ' tables present',
     absent.length ? 'missing: ' + absent.join(', ') : '');
 
-  record(await sql.exists("SELECT 1 FROM pg_tables WHERE tablename = 'schema_migrations'"),
-    'migration ledger exists');
+  // Must be scoped to public: Supabase keeps its own auth.schema_migrations and
+  // realtime.schema_migrations, so an unscoped lookup reports the ledger as
+  // present on a completely empty database.
+  record(await sql.exists(
+    "SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'schema_migrations'"),
+  'migration ledger exists');
   if (present.indexOf('schema_migrations') > -1) {
     var applied = await sql.many('SELECT name FROM schema_migrations ORDER BY name');
     note('applied', applied.map(function (r) { return r.name; }).join(', ') || 'none');
