@@ -27,6 +27,38 @@ var ROOT = path.join(__dirname, '..');
 var DB_NAME = process.env.TEST_DB || 'functional_tool_test';
 var DB_URL = process.env.TEST_DATABASE_URL || ('postgres://localhost:5432/' + DB_NAME);
 
+/**
+ * Refuse to run against anything that is not a local database.
+ *
+ * resetDatabase() runs `dropdb`. Until now that was safe because this file
+ * overrides DATABASE_URL with a local one — safe by accident. With production
+ * credentials sitting in .env, an override of TEST_DATABASE_URL, a stray
+ * export, or someone editing the default would be enough to drop a live
+ * database. This makes it impossible rather than unlikely.
+ */
+(function refuseRemote() {
+  var host = '';
+  try {
+    host = new URL(DB_URL).hostname;
+  } catch {
+    throw new Error('TEST_DATABASE_URL is not a valid URL: ' + DB_URL);
+  }
+
+  var local = ['localhost', '127.0.0.1', '::1', '0.0.0.0', ''];
+  if (local.indexOf(host) === -1) {
+    console.error('\n  REFUSING TO RUN\n');
+    console.error('  The tests create and DROP their database. The configured host is');
+    console.error('  "' + host + '", which is not local.\n');
+    console.error('  Point TEST_DATABASE_URL at a local Postgres, or unset it.\n');
+    process.exit(1);
+  }
+
+  if (/supabase|pooler|amazonaws|\.co$|\.io$|\.com$/i.test(DB_URL)) {
+    console.error('\n  REFUSING TO RUN — the test database URL looks remote.\n');
+    process.exit(1);
+  }
+})();
+
 var JWT_SECRET = 'test-secret-'.repeat(4);
 var SUPABASE_URL = 'http://supabase.test';
 
@@ -82,7 +114,8 @@ async function mintAccessToken(user, expiresInSeconds) {
     .sign(new TextEncoder().encode(JWT_SECRET));
 }
 
-var refreshTokens = new Map();  // refresh token -> user id
+var refreshTokens = new Map();   // refresh token -> user id
+var recoveryHashes = new Map();  // token_hash -> email, as the reset email carries
 
 async function sessionFor(user, expiresIn) {
   var refresh = crypto.randomUUID();
@@ -117,10 +150,20 @@ function fakeAuthClient() {
         refreshTokens.delete(c.refresh_token);
         return ok({ user: user, session: await sessionFor(user) });
       },
-      resetPasswordForEmail: async function () { return ok({}); },
+      resetPasswordForEmail: async function (email) {
+        // Stand in for the emailed link: mint a hash the test can use
+        recoveryHashes.set('recovery-' + email, String(email).toLowerCase());
+        return ok({});
+      },
+      // The real flow hands back a token_hash in the emailed link; the hash
+      // alone identifies the account, so no email is supplied.
       verifyOtp: async function (c) {
-        var user = [...authUsers.values()].find(function (u) { return u.email === c.email; });
-        if (!user || c.token !== 'valid-recovery-token') return fail('Token has expired', 401);
+        var hash = c.token_hash || c.token;
+        var email = recoveryHashes.get(hash);
+        if (!email) return fail('Token has expired or is invalid', 401);
+        var user = [...authUsers.values()].find(function (u) { return u.email === email; });
+        if (!user) return fail('User not found', 404);
+        recoveryHashes.delete(hash);        // single use, as Supabase does
         return ok({ user: user, session: await sessionFor(user) });
       },
       admin: {
@@ -258,6 +301,7 @@ module.exports = {
   SUPABASE_URL: SUPABASE_URL,
   resetDatabase: resetDatabase,
   install: install,
+  recoveryHashes: recoveryHashes,
   createAccount: createAccount,
   mintAccessToken: mintAccessToken,
   putObject: putObject,

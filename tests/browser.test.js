@@ -299,6 +299,89 @@ var setFile = function (sel, name, mime, size) {
     check('a short password is refused',
       (await cdp.evaluate(page, txt('#pw-error'))).length > 0, await cdp.evaluate(page, txt('#pw-error')));
 
+    // ---------------------------------------------------------------
+    section('password recovery, end to end');
+
+    // Signed out, following the link from the login card
+    await cdp.signOut(page, BASE);
+
+    check('the login card offers a way out',
+      await cdp.evaluate(page, has('#login-view .card-foot a[href="/forgot-password"]')));
+
+    await cdp.nav(page, '/forgot-password');
+    check('/forgot-password shows its own card',
+      await cdp.evaluate(page, "!document.getElementById('forgot-view').classList.contains('hidden')"));
+    check('  and the login card is hidden',
+      await cdp.evaluate(page, "document.getElementById('login-view').classList.contains('hidden')"));
+
+    await cdp.evaluate(page, typeInto('#forgot-email', 'poc@example.test'));
+    await cdp.evaluate(page, "document.getElementById('forgot-form').requestSubmit(); true");
+    await cdp.sleep(900);
+    check('requesting a link gives a neutral answer',
+      (await cdp.evaluate(page, txt('#forgot-sent'))).indexOf('If that address') > -1,
+      await cdp.evaluate(page, txt('#forgot-sent')));
+    await cdp.screenshot(page, '07-forgot');
+
+    // A link with no token must not offer a form that cannot work
+    await cdp.goto(page, BASE + '/reset-password', '#reset-view:not(.hidden)');
+    check('an incomplete link is refused up front',
+      (await cdp.evaluate(page, txt('#reset-error'))).length > 0,
+      await cdp.evaluate(page, txt('#reset-error')));
+    check('  with the button disabled',
+      await cdp.evaluate(page, "document.getElementById('reset-submit').disabled"));
+
+    // The real thing. This URL is what the emailed link resolves to.
+    var hash = 'recovery-poc@example.test';
+    check('the request minted a usable link', harness.recoveryHashes.has(hash));
+
+    await cdp.goto(page, BASE + '/reset-password?token_hash=' + encodeURIComponent(hash) +
+      '&type=recovery', '#reset-view:not(.hidden)');
+    check('a complete link enables the form',
+      !(await cdp.evaluate(page, "document.getElementById('reset-submit').disabled")));
+    await cdp.screenshot(page, '08-reset');
+
+    await cdp.evaluate(page, typeInto('#reset-password', 'short'));
+    await cdp.evaluate(page, typeInto('#reset-confirm', 'short'));
+    await cdp.evaluate(page, "document.getElementById('reset-form').requestSubmit(); true");
+    await cdp.sleep(500);
+    check('a short password is refused',
+      (await cdp.evaluate(page, txt('#reset-error'))).indexOf('at least') > -1,
+      await cdp.evaluate(page, txt('#reset-error')));
+
+    await cdp.evaluate(page, typeInto('#reset-password', 'BrandNewPassword1'));
+    await cdp.evaluate(page, typeInto('#reset-confirm', 'DifferentPassword1'));
+    await cdp.evaluate(page, "document.getElementById('reset-form').requestSubmit(); true");
+    await cdp.sleep(500);
+    check('a mismatch is refused',
+      (await cdp.evaluate(page, txt('#reset-error'))).indexOf('do not match') > -1,
+      await cdp.evaluate(page, txt('#reset-error')));
+
+    await cdp.evaluate(page, typeInto('#reset-confirm', 'BrandNewPassword1'));
+    await cdp.evaluate(page, "document.getElementById('reset-form').requestSubmit(); true");
+    await cdp.sleep(2000);
+
+    check('a successful reset lands signed in, not back on the card',
+      await cdp.evaluate(page, "!document.getElementById('app-view').classList.contains('hidden')"),
+      await cdp.evaluate(page, 'location.pathname'));
+    check('  on the dashboard', (await cdp.evaluate(page, 'location.pathname')) === '/dashboard',
+      await cdp.evaluate(page, 'location.pathname'));
+    check('  and the token_hash is gone from the address bar',
+      (await cdp.evaluate(page, 'location.search')).indexOf('token_hash') === -1,
+      await cdp.evaluate(page, 'location.search'));
+    check('  the session is real', (await cdp.evaluate(page, `
+      (async () => (await fetch('/api/auth/me')).status)()`, true)) === 200);
+    await cdp.screenshot(page, '09-reset-complete');
+
+    check('the new password works',
+      (await cdp.evaluate(page, `
+        (async () => {
+          const r = await fetch('/api/auth/login', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: 'poc@example.test', password: 'BrandNewPassword1' })
+          });
+          return r.status;
+        })()`, true)) === 200);
+
     check('no uncaught page errors anywhere', pageErrors.length === 0,
       pageErrors.slice(0, 3).join(' | '));
 

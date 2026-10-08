@@ -16,6 +16,16 @@
 
 require('../server/env');
 
+/**
+ * DDL goes over the SESSION pooler (port 5432), not the transaction pooler the
+ * app uses. Transaction mode hands out a different backend per statement,
+ * which is wrong for CREATE EXTENSION and for multi-statement DDL, so the
+ * migration connection is kept deliberately separate.
+ */
+if (process.env.DIRECT_DATABASE_URL) {
+  process.env.DATABASE_URL = process.env.DIRECT_DATABASE_URL;
+}
+
 var crypto = require('crypto');
 var fs = require('fs');
 var path = require('path');

@@ -418,6 +418,7 @@ async function call(who, method, path, body, options) {
       { email: 'admin@example.test', password: 'AdminPassword1' })).status === 401);
 
   section('forgot password');
+  await call('nobody2', 'POST', '/api/auth/forgot', { email: 'poc@example.test' });
   var forgot = await call('nobody2', 'POST', '/api/auth/forgot', { email: 'admin@example.test' });
   var forgotUnknown = await call('nobody3', 'POST', '/api/auth/forgot', { email: 'ghost@example.test' });
   check('forgot-password answers identically for a real and an unknown address',
@@ -425,13 +426,28 @@ async function call(who, method, path, body, options) {
     JSON.stringify(forgot.data) === JSON.stringify(forgotUnknown.data),
     JSON.stringify(forgot.data) + ' vs ' + JSON.stringify(forgotUnknown.data));
 
+  // The emailed link carries a token_hash and nothing else — no address to
+  // re-type, and one fewer field a caller can get wrong.
+  var hash = 'recovery-poc@example.test';
+  check('requesting a reset minted a usable link', harness.recoveryHashes.has(hash));
+
+  var shortReset = await call('nobody4', 'POST', '/api/auth/reset',
+    { tokenHash: hash, newPassword: 'short' });
+  check('a short new password is refused', shortReset.status === 400, shortReset.data.error);
+
   var reset = await call('nobody4', 'POST', '/api/auth/reset',
-    { email: 'poc@example.test', token: 'valid-recovery-token', newPassword: 'ResetPassword123' });
-  check('a valid reset token sets a new password', reset.status === 200, JSON.stringify(reset.data));
+    { tokenHash: hash, newPassword: 'ResetPassword123' });
+  check('a valid reset link sets a new password', reset.status === 200, JSON.stringify(reset.data));
   check('  and signs the browser in', !!reset.setCookies.length);
-  check('an invalid token is refused',
+  check('  the new password works',
+    (await call('resetcheck', 'POST', '/api/auth/login',
+      { email: 'poc@example.test', password: 'ResetPassword123' })).status === 200);
+  check('  and the link cannot be used twice',
+    (await call('nobody6', 'POST', '/api/auth/reset',
+      { tokenHash: hash, newPassword: 'AnotherPassword123' })).status === 400);
+  check('an invalid link is refused',
     (await call('nobody5', 'POST', '/api/auth/reset',
-      { email: 'poc@example.test', token: 'nope', newPassword: 'ResetPassword123' })).status === 400);
+      { tokenHash: 'nope', newPassword: 'ResetPassword123' })).status === 400);
 
   // ---------------------------------------------------------------
   section('logout');

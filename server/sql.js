@@ -44,10 +44,37 @@ if (!connectionString) {
 
 var isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
 
+/**
+ * TLS for the remote connection.
+ *
+ * Certificates are verified against the system CA store. The usual
+ * `rejectUnauthorized: false` advice accepts *any* certificate, which means a
+ * machine between here and Supabase can read every query and every row — not
+ * a trade worth making for a database on the public internet.
+ *
+ * SUPABASE_CA_CERT pins a specific CA if the system store does not cover the
+ * pooler. PGSSL_INSECURE=true turns verification off, and is deliberately
+ * named so that choosing it is visible in the environment rather than hidden
+ * in a source file.
+ */
+function tlsOptions() {
+  if (isLocal) return false;
+
+  if (process.env.PGSSL_INSECURE === 'true') {
+    console.warn('[pg] PGSSL_INSECURE=true — the server certificate is NOT being verified');
+    return { rejectUnauthorized: false };
+  }
+
+  var options = { rejectUnauthorized: true };
+  if (process.env.SUPABASE_CA_CERT) {
+    options.ca = process.env.SUPABASE_CA_CERT.replace(/\\n/g, '\n');
+  }
+  return options;
+}
+
 var pool = new pg.Pool({
   connectionString: connectionString,
-  // Supabase requires TLS; a local postgres has none.
-  ssl: isLocal ? false : { rejectUnauthorized: false },
+  ssl: tlsOptions(),
   // Serverless: each instance handles one request at a time, so a large pool
   // per instance just holds connections open across the whole fleet.
   max: Number(process.env.PG_POOL_MAX || (process.env.VERCEL ? 1 : 10)),

@@ -29,6 +29,43 @@
     </p>
 
     <button type="submit" class="btn-primary btn-block" id="login-submit">Sign in</button>
+    <p class="card-foot"><a href="/forgot-password">Forgot your password?</a></p>
+  </form>
+</div>
+
+<!-- ============ Forgot password ============ -->
+<div id="forgot-view" class="login-wrap hidden">
+  <form class="login-card" id="forgot-form">
+    <h1>Reset your password</h1>
+    <p class="sub">We will email you a link to set a new one.</p>
+
+    <label for="forgot-email">Email</label>
+    <input type="email" id="forgot-email" autocomplete="username" required />
+
+    <p class="error hidden" id="forgot-error"></p>
+    <p class="notice hidden" id="forgot-sent"></p>
+
+    <button type="submit" class="btn-primary btn-block" id="forgot-submit">Send the link</button>
+    <p class="card-foot"><a href="/login">Back to sign in</a></p>
+  </form>
+</div>
+
+<!-- ============ Set a new password (from the emailed link) ============ -->
+<div id="reset-view" class="login-wrap hidden">
+  <form class="login-card" id="reset-form">
+    <h1>Set a new password</h1>
+    <p class="sub" id="reset-sub">Choose something you have not used before.</p>
+
+    <label for="reset-password">New password</label>
+    <input type="password" id="reset-password" autocomplete="new-password" required />
+
+    <label for="reset-confirm">Confirm new password</label>
+    <input type="password" id="reset-confirm" autocomplete="new-password" required />
+
+    <p class="error hidden" id="reset-error"></p>
+
+    <button type="submit" class="btn-primary btn-block" id="reset-submit">Save and sign in</button>
+    <p class="card-foot"><a href="/login">Back to sign in</a></p>
   </form>
 </div>
 

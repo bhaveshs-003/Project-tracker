@@ -140,6 +140,24 @@ button {
 .btn-block { width: 100%; margin-top: 22px; padding: 12px; font-size: 15px; }
 .btn-block:disabled { background: #c3c8d0; cursor: not-allowed; }
 
+/* "Forgot your password?" / "Back to sign in" under the card's button */
+.card-foot { margin: var(--s4) 0 0; text-align: center; font-size: 13px; }
+.card-foot a { color: var(--accent-ink); text-decoration: none; }
+.card-foot a:hover { text-decoration: underline; }
+
+/* The "check your inbox" answer — deliberately not styled as success, because
+   the server says the same thing whether or not the address exists. */
+.notice {
+  margin: var(--s4) 0 0;
+  padding: 9px 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  color: var(--accent-ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 /* ---------- Top bar ---------- */
 .topbar {
   background: var(--surface);

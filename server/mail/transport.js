@@ -35,6 +35,7 @@
  */
 
 var fs = require('fs');
+var os = require('os');
 var path = require('path');
 
 var OUTBOX_DIR = path.join(__dirname, '..', '..', 'data', 'outbox');
@@ -54,12 +55,47 @@ function allowed(address) {
 }
 
 // ---- log transport: the default, and what the tests run against ----
+
+/**
+ * Where the .eml actually goes.
+ *
+ * Resolved once, lazily, because `data/` is only writable on a laptop: a
+ * serverless filesystem is read-only outside the temp directory, and
+ * mkdirSync would throw on every notification. Falling back to tmpdir keeps
+ * the transport working anywhere; returning null means write nowhere and just
+ * log, which is still better than failing the approval that queued it.
+ */
+var resolvedOutbox;
+
+function outboxDir() {
+  if (resolvedOutbox !== undefined) return resolvedOutbox;
+
+  var candidates = [OUTBOX_DIR, path.join(os.tmpdir(), 'functional-tool-outbox')];
+  for (var i = 0; i < candidates.length; i++) {
+    try {
+      fs.mkdirSync(candidates[i], { recursive: true });
+      fs.accessSync(candidates[i], fs.constants.W_OK);
+      if (i > 0) console.log('[mail] outbox is not writable; using ' + candidates[i]);
+      resolvedOutbox = candidates[i];
+      return resolvedOutbox;
+    } catch { /* try the next one */ }
+  }
+
+  console.warn('[mail] no writable outbox directory; messages will be logged only');
+  resolvedOutbox = null;
+  return resolvedOutbox;
+}
+
 function sendToDisk(message) {
-  if (!fs.existsSync(OUTBOX_DIR)) fs.mkdirSync(OUTBOX_DIR, { recursive: true });
+  var dir = outboxDir();
+  if (!dir) {
+    console.log('[mail] (not written) → ' + message.to + '  "' + message.subject + '"');
+    return { transport: 'log', file: null };
+  }
 
   var stamp = new Date().toISOString().replace(/[:.]/g, '-');
   var safeTo = message.to.replace(/[^a-z0-9@._-]/gi, '_');
-  var file = path.join(OUTBOX_DIR, stamp + '__' + safeTo + '.eml');
+  var file = path.join(dir, stamp + '__' + safeTo + '.eml');
 
   // A real .eml so it opens in any mail client
   var eml = [

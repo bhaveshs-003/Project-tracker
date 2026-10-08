@@ -14,6 +14,7 @@ import { renderProject } from './views/project.js';
 import { renderPeople } from './views/people.js';
 import { renderAudit } from './views/audit.js';
 import { renderProfile } from './views/profile.js';
+import { wireForgot, wireReset, prepareReset } from './views/reset.js';
 
 const loginView = () => document.getElementById('login-view');
 const appView = () => document.getElementById('app-view');
@@ -107,6 +108,12 @@ route('/profile', { role: 'any', render: view((m) => renderProfile(m)) });
 route('/people', { role: 'admin', render: view((m) => renderPeople(m)) });
 route('/audit', { role: 'admin', render: view((m) => renderAudit(m)) });
 route('/login', { role: 'anonymous', render: async () => showLogin() });
+route('/forgot-password', { role: 'anonymous', render: async () => showCard('forgot-view') });
+// Where the emailed reset link lands, carrying ?token_hash=...
+route('/reset-password', {
+  role: 'anonymous',
+  render: async () => { showCard('reset-view'); prepareReset(); }
+});
 
 setNotFound((path) => {
   highlightTab();
@@ -117,10 +124,20 @@ setNotFound((path) => {
 // ---------------------------------------------------------------
 // Sign in / out
 // ---------------------------------------------------------------
-function showLogin() {
+// The three signed-out cards. Exactly one is ever visible, and all of them
+// live outside #app-view, which is hidden to anyone without a session.
+const SIGNED_OUT_CARDS = ['login-view', 'forgot-view', 'reset-view'];
+
+function showCard(id) {
   state.user = null;
   appView().classList.add('hidden');
-  loginView().classList.remove('hidden');
+  SIGNED_OUT_CARDS.forEach(card => {
+    document.getElementById(card).classList.toggle('hidden', card !== id);
+  });
+}
+
+function showLogin() {
+  showCard('login-view');
   document.getElementById('login-form').reset();
   document.getElementById('login-email').focus();
 }
@@ -131,17 +148,21 @@ function loginError(message) {
   el.classList.remove('hidden');
 }
 
+const SIGNED_OUT_PATHS = ['/login', '/forgot-password', '/reset-password'];
+
 async function enterApp(user) {
   state.user = user;
   await loadPeople();               // names are needed by nearly every view
-  loginView().classList.add('hidden');
+  SIGNED_OUT_CARDS.forEach(card => document.getElementById(card).classList.add('hidden'));
   appView().classList.remove('hidden');
   document.getElementById('login-error').classList.add('hidden');
   renderShell();
 
+  // Landing on the dashboard after a reset rather than back on the card that
+  // just succeeded — and the token_hash leaves the address bar with it.
   const intended = takeIntendedPath();
-  await navigate(intended || (location.pathname === '/login' ? homePath() : location.pathname),
-    { replace: true });
+  const here = SIGNED_OUT_PATHS.includes(location.pathname) ? homePath() : location.pathname;
+  await navigate(intended || here, { replace: true });
 }
 
 document.getElementById('login-form').addEventListener('submit', async (e) => {
@@ -212,6 +233,11 @@ async function boot() {
   }
 
   if (!user) {
+    // Signed out is the *expected* state on the recovery cards — someone
+    // following a reset link has no session by definition. Forcing /login
+    // here would throw away the token_hash in the URL and strand them.
+    if (SIGNED_OUT_PATHS.includes(location.pathname)) return resolve();
+
     showLogin();
     history.replaceState({}, '', '/login');
     return;
@@ -219,6 +245,11 @@ async function boot() {
 
   await enterApp(user);
 }
+
+// The recovery cards wire themselves once; enterApp is how a successful reset
+// turns straight into a session.
+wireForgot();
+wireReset(enterApp);
 
 bind();           // popstate + in-app link interception, once
 boot();

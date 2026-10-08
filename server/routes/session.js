@@ -115,28 +115,35 @@ router.post('/forgot', asyncHandler(async function (req, res) {
 }));
 
 /**
- * Complete a reset. The recovery token arrives from the emailed link; the
- * client posts it here rather than holding a session, so the new password is
- * set and the browser gets ordinary httpOnly cookies like any other sign-in.
+ * Complete a reset.
+ *
+ * The client sends the `token_hash` out of the emailed link and nothing else.
+ * Supabase's email template is configured to point at /reset-password with
+ * that hash, and the hash alone identifies the account — so the user never
+ * re-types their address, and there is no second field to get wrong.
+ *
+ * On success this is an ordinary signed-in session, with the same httpOnly
+ * cookies any other sign-in produces.
  */
 router.post('/reset', asyncHandler(async function (req, res) {
   var input = v.body(v.z.object({
-    token: v.z.string().min(1, 'The reset link is incomplete').max(4000),
-    email: v.z.string().trim().toLowerCase().email().max(320),
+    tokenHash: v.z.string().min(1, 'The reset link is incomplete').max(4000),
     newPassword: v.z.string()
       .min(MIN_PASSWORD, 'Use at least ' + MIN_PASSWORD + ' characters')
       .max(200)
   }), req);
 
-  if (await guards.isRateLimited('reset', input.email, req)) {
+  // Keyed on IP only: the address is not known until the token is verified,
+  // which is the point of taking the hash on its own.
+  if (await guards.isRateLimited('reset', null, req)) {
     return res.status(429).json({ error: 'Too many attempts. Try again later.' });
   }
 
   var verified = await supabase.anon.auth.verifyOtp({
-    email: input.email, token: input.token, type: 'recovery'
+    token_hash: input.tokenHash, type: 'recovery'
   });
   if (verified.error || !verified.data || !verified.data.session) {
-    await guards.recordAttempt('reset', input.email, req, false);
+    await guards.recordAttempt('reset', null, req, false);
     return res.status(400).json({ error: 'That reset link is invalid or has expired.' });
   }
 
@@ -149,7 +156,7 @@ router.post('/reset', asyncHandler(async function (req, res) {
   var person = await guards.loadPerson(verified.data.user.id);
   if (!person) return res.status(400).json({ error: 'That account cannot sign in.' });
 
-  await guards.recordAttempt('reset', input.email, req, true);
+  await guards.recordAttempt('reset', person.email, req, true);
   await audit.record({ id: person.id, name: person.name, role: person.role },
     'User', 'Reset password', person.name, '', null);
 

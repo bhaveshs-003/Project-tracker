@@ -8,7 +8,7 @@
 
 var fs = require('fs');
 var path = require('path');
-var { spawn, execSync } = require('child_process');
+var { spawn } = require('child_process');
 
 var SHOTS = path.join(__dirname, '..', '.test-output', 'shots');
 
@@ -139,8 +139,13 @@ async function goto(cdp, url, waitFor) {
   throw new Error('never became ready: ' + url + ' (waiting for ' + selector + ')');
 }
 
-async function login(cdp, base, email, password) {
-  // A live session bounces /login straight to the dashboard, so sign out first
+/**
+ * End any session and land on the login card.
+ *
+ * A live session bounces /login straight to the dashboard, so simply
+ * navigating there is not enough — the logout has to happen first.
+ */
+async function signOut(cdp, base) {
   await goto(cdp, base + '/login',
     '#login-view:not(.hidden) #login-email, #app-view:not(.hidden) .tab');
 
@@ -150,9 +155,14 @@ async function login(cdp, base, email, password) {
   }
   for (var i = 0; i < 40; i++) {
     /* eslint-disable no-await-in-loop */
-    if (await evaluate(cdp, "!document.getElementById('login-view').classList.contains('hidden')")) break;
+    if (await evaluate(cdp, "!document.getElementById('login-view').classList.contains('hidden')")) return;
     await sleep(150);
   }
+  throw new Error('could not reach the login card');
+}
+
+async function login(cdp, base, email, password) {
+  await signOut(cdp, base);
 
   await evaluate(cdp, `
     (() => {
@@ -185,11 +195,15 @@ async function nav(cdp, path_) {
 
 function kill(browser) {
   try { browser.process.kill('SIGTERM'); } catch { /* already gone */ }
-  try { execSync('rm -rf ' + JSON.stringify(browser.profile)); } catch { /* fine */ }
+  // Chrome keeps writing for a moment after SIGTERM, so a straight rm races it
+  // and prints "Directory not empty" on every run.
+  setTimeout(function () {
+    try { fs.rmSync(browser.profile, { recursive: true, force: true }); } catch { /* fine */ }
+  }, 300).unref();
 }
 
 module.exports = {
   SHOTS: SHOTS, findChrome: findChrome, launch: launch, connect: connect,
   evaluate: evaluate, screenshot: screenshot, setViewport: setViewport,
-  goto: goto, login: login, nav: nav, sleep: sleep, kill: kill
+  goto: goto, login: login, signOut: signOut, nav: nav, sleep: sleep, kill: kill
 };

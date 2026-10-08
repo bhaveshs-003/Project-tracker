@@ -41,9 +41,13 @@ export function navigate(path, { replace = false } = {}) {
   return resolve();
 }
 
+// Nowhere to come back to: these are the signed-out cards themselves, and
+// remembering one would bounce a user straight back to it after they signed in.
+const NOT_A_DESTINATION = ['/', '/login', '/forgot-password', '/reset-password'];
+
 export function rememberIntendedPath() {
   const path = location.pathname;
-  if (path !== '/login' && path !== '/') pendingPath = path;
+  if (!NOT_A_DESTINATION.includes(path)) pendingPath = path;
 }
 
 export function takeIntendedPath() {

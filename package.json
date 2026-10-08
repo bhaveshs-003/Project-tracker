@@ -11,7 +11,10 @@
     "test:api": "node tests/api.test.js",
     "test:perf": "node tests/performance.test.js",
     "test:concurrency": "node tests/concurrency.test.js",
-    "test:schema": "node tests/schema.test.js"
+    "test:schema": "node tests/schema.test.js",
+    "doctor": "node scripts/doctor.js",
+    "setup:storage": "node scripts/setup-storage.js",
+    "test:browser": "node --experimental-websocket tests/browser.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",

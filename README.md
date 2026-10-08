@@ -53,9 +53,22 @@ Import the repository. `vercel.json` routes `/api/*` to the function and serves 
 from the CDN; there is nothing to build. Set every variable from `.env.example` in the
 project's environment, with `NODE_ENV=production`.
 
-Use the **transaction pooler** connection string, port **6543**. The direct connection on
-5432 will run out of connections the first time traffic arrives, because a serverless
-function opens a new one per cold start.
+### Connection strings — you need two
+
+Supabase offers three. Which one goes where matters, and getting it wrong fails in ways
+that look like something else entirely.
+
+| Variable | Which string | Why |
+|---|---|---|
+| `DATABASE_URL` | **Transaction pooler**, port **6543** | What the app uses. A serverless function opens a connection per cold start, so it must go through a pooler. This is also why `sql.js` never names a prepared statement — transaction mode multiplexes one backend across callers, and a named statement from one request collides with the next. |
+| `DIRECT_DATABASE_URL` | **Session pooler**, port **5432** | Migrations only. DDL, `CREATE EXTENSION` and multi-statement transactions need one backend for the whole session. `scripts/migrate.js` uses this when set. |
+
+Not the direct connection (`db.<ref>.supabase.co`) for either: it is IPv6-only on new
+projects and will not resolve from most home or office networks. Both pooler strings use the
+same host and password and differ only by port.
+
+TLS certificates are verified against the system CA store. `PGSSL_INSECURE=true` turns that
+off and exists only for diagnosing a TLS problem — never leave it set.
 
 ### 3. Seed
 
